@@ -1,0 +1,107 @@
+{
+    "name": "0Enhanced3",
+    "description": "An advanced pixel sorting effect that applies visual transformations strictly within a segmented mask, with parameters for sorting style, rotation, noise, and more.",
+    "defaultParams": {
+        "threshold_min": {
+            "type": "int",
+            "value": 0,
+            "min": 0,
+            "max": 255,
+            "step": 1,
+            "widgetType": "slider"
+        },
+        "threshold_max": {
+            "type": "int",
+            "value": 255,
+            "min": 0,
+            "max": 255,
+            "step": 1,
+            "widgetType": "slider"
+        },
+        "angle": {
+            "type": "float",
+            "value": 0,
+            "min": 0,
+            "max": 360,
+            "step": 1,
+            "widgetType": "slider"
+        },
+        "contrast": {
+            "type": "float",
+            "value": 1.0,
+            "min": 0.5,
+            "max": 2.0,
+            "step": 0.1,
+            "widgetType": "slider"
+        },
+        "saturation": {
+            "type": "float",
+            "value": 1.0,
+            "min": 0.5,
+            "max": 2.0,
+            "step": 0.1,
+            "widgetType": "slider"
+        },
+        "resolution": {
+            "type": "int",
+            "value": 1,
+            "min": 1,
+            "max": 10,
+            "step": 1,
+            "widgetType": "slider"
+        },
+        "noise_amount": {
+            "type": "int",
+            "value": 0,
+            "min": 0,
+            "max": 100,
+            "step": 1,
+            "widgetType": "slider"
+        },
+        "noise_scale": {
+            "type": "float",
+            "value": 1.0,
+            "min": 0.1,
+            "max": 10.0,
+            "step": 0.1,
+            "widgetType": "slider"
+        },
+        "sorting_direction": {
+            "type": "int",
+            "value": 0,
+            "min": 0,
+            "max": 1,
+            "step": 1,
+            "widgetType": "dropdown",
+            "options": {
+                "0": "Vertical",
+                "1": "Horizontal"
+            }
+        },
+        "sorting_style": {
+            "type": "int",
+            "value": 0,
+            "min": 0,
+            "max": 2,
+            "step": 1,
+            "widgetType": "dropdown",
+            "options": {
+                "0": "Hue",
+                "1": "Saturation",
+                "2": "Lightness"
+            }
+        }
+    },
+    "paramDescriptions": {
+        "threshold_min": "Minimum brightness level for pixels to be considered for sorting. Adjust to control effect sensitivity.",
+        "threshold_max": "Maximum brightness level for pixels to be considered for sorting. Adjust to control effect range.",
+        "angle": "Rotates the segmented area by the specified angle before applying the effect. Useful for adjusting the effect orientation.",
+        "contrast": "Modifies the contrast of the effect within the segmented mask.",
+        "saturation": "Adjusts the saturation of the effect within the segmented mask.",
+        "resolution": "Determines the resolution scaling of the effect for faster processing. Higher values result in a lower processing resolution.",
+        "noise_amount": "Amount of noise to add to the effect, with higher values introducing more randomness.",
+        "noise_scale": "The scale of the noise pattern applied to the effect. Adjust to control noise intensity.",
+        "sorting_direction": "Direction of pixel sorting. Choose between Vertical or Horizontal.",
+        "sorting_style": "Basis for pixel sorting: Hue, Saturation, or Lightness."
+    }
+}

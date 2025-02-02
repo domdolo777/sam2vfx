@@ -1,0 +1,107 @@
+{
+    "name": "0-starPixel_2",
+    "description": "A pixel sorting effect that applies manipulation strictly within a segmented area, allowing for precise and isolated visual transformations.",
+    "defaultParams": {
+        "threshold_min": {
+            "type": "int",
+            "value": 0,
+            "min": 0,
+            "max": 255,
+            "step": 1,
+            "widgetType": "slider"
+        },
+        "threshold_max": {
+            "type": "int",
+            "value": 255,
+            "min": 0,
+            "max": 255,
+            "step": 1,
+            "widgetType": "slider"
+        },
+        "angle": {
+            "type": "float",
+            "value": 0,
+            "min": 0,
+            "max": 360,
+            "step": 1,
+            "widgetType": "slider"
+        },
+        "contrast": {
+            "type": "float",
+            "value": 1.0,
+            "min": 0.5,
+            "max": 2.0,
+            "step": 0.1,
+            "widgetType": "slider"
+        },
+        "saturation": {
+            "type": "float",
+            "value": 1.0,
+            "min": 0.5,
+            "max": 2.0,
+            "step": 0.1,
+            "widgetType": "slider"
+        },
+        "resolution": {
+            "type": "int",
+            "value": 1,
+            "min": 1,
+            "max": 10,
+            "step": 1,
+            "widgetType": "slider"
+        },
+        "noise_amount": {
+            "type": "int",
+            "value": 0,
+            "min": 0,
+            "max": 100,
+            "step": 1,
+            "widgetType": "slider"
+        },
+        "noise_scale": {
+            "type": "float",
+            "value": 1.0,
+            "min": 0.1,
+            "max": 10.0,
+            "step": 0.1,
+            "widgetType": "slider"
+        },
+        "sorting_direction": {
+            "type": "int",
+            "value": 0,
+            "min": 0,
+            "max": 1,
+            "step": 1,
+            "widgetType": "dropdown",
+            "options": {
+                "0": "Vertical",
+                "1": "Horizontal"
+            }
+        },
+        "sorting_style": {
+            "type": "int",
+            "value": 0,
+            "min": 0,
+            "max": 2,
+            "step": 1,
+            "widgetType": "dropdown",
+            "options": {
+                "0": "Hue",
+                "1": "Saturation",
+                "2": "Lightness"
+            }
+        }
+    },
+    "paramDescriptions": {
+        "threshold_min": "Sets the minimum brightness value for pixels to be considered for sorting. Only affects pixels within the segmented area.",
+        "threshold_max": "Sets the maximum brightness value for pixels to be considered for sorting. Only affects pixels within the segmented area.",
+        "angle": "Rotates the segmented area by the specified angle before sorting.",
+        "contrast": "Adjusts the contrast of the sorted pixels within the segmented area.",
+        "saturation": "Modifies the saturation of the sorted pixels within the segmented area.",
+        "resolution": "Determines the resolution factor for pixel sorting; higher values mean lower resolution.",
+        "noise_amount": "Adds a specified amount of noise to the sorted pixels within the segmented area.",
+        "noise_scale": "Controls the scale of the noise pattern applied to the sorted area.",
+        "sorting_direction": "Defines the direction of the pixel sorting: 0 for vertical, 1 for horizontal.",
+        "sorting_style": "Selects the basis for pixel sorting: 0 = Hue, 1 = Saturation, 2 = Lightness."
+    }
+}

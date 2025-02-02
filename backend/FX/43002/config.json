@@ -1,0 +1,96 @@
+{
+    "name": "4-3002",
+    "description": "An advanced pixel sorting effect with customizable thresholds, direction, noise, randomness, and strip control.",
+    "defaultParams": {
+        "threshold_min": {
+            "type": "float",
+            "value": 0.0,
+            "min": 0.0,
+            "max": 1.0,
+            "step": 0.01,
+            "widgetType": "slider"
+        },
+        "threshold_max": {
+            "type": "float",
+            "value": 0.8,
+            "min": 0.0,
+            "max": 1.0,
+            "step": 0.01,
+            "widgetType": "slider"
+        },
+        "randomness": {
+            "type": "float",
+            "value": 0.0,
+            "min": 0.0,
+            "max": 1.0,
+            "step": 0.01,
+            "widgetType": "slider"
+        },
+        "direction": {
+            "type": "string",
+            "value": "horizontal",
+            "options": [
+                "horizontal",
+                "vertical"
+            ],
+            "widgetType": "dropdown"
+        },
+        "strip_width": {
+            "type": "int",
+            "value": 5,
+            "min": 1,
+            "max": 100,
+            "step": 1,
+            "widgetType": "slider"
+        },
+        "strip_spacing": {
+            "type": "int",
+            "value": 1,
+            "min": -50,
+            "max": 50,
+            "step": 1,
+            "widgetType": "slider"
+        },
+        "pulling_distance": {
+            "type": "float",
+            "value": 1.0,
+            "min": 0.1,
+            "max": 10.0,
+            "step": 0.1,
+            "widgetType": "slider"
+        },
+        "sorting_style": {
+            "type": "int",
+            "value": 0,
+            "min": 0,
+            "max": 2,
+            "step": 1,
+            "widgetType": "dropdown"
+        },
+        "noise_strength": {
+            "type": "float",
+            "value": 0.0,
+            "min": 0.0,
+            "max": 1.0,
+            "step": 0.01,
+            "widgetType": "slider"
+        },
+        "invert_mask": {
+            "type": "bool",
+            "value": false,
+            "widgetType": "checkbox"
+        }
+    },
+    "paramDescriptions": {
+        "threshold_min": "Minimum pixel lightness to be sorted.",
+        "threshold_max": "Maximum pixel lightness to be sorted.",
+        "randomness": "Percentage of intervals that remain unsorted.",
+        "direction": "Direction for pixel sorting (horizontal or vertical).",
+        "strip_width": "Width of each sorting strip.",
+        "strip_spacing": "Space between pixel-sorted strips (can be negative).",
+        "pulling_distance": "How far the pixels are pulled from their original position.",
+        "sorting_style": "Defines sorting based on Hue (0), Saturation (1), or Lightness (2).",
+        "noise_strength": "Strength of the added noise.",
+        "invert_mask": "Invert the effect mask to apply outside the selected area."
+    }
+}

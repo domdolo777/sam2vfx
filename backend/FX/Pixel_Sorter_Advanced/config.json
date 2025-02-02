@@ -1,0 +1,89 @@
+{
+    "name": "Pixel_Sorter_Advanced",
+    "description": "An advanced pixel sorting effect with customizable thresholds, angle, randomness, and characteristic length for creating unique visual styles.",
+    "defaultParams": {
+        "threshold_min": {
+            "type": "float",
+            "value": 0.25,
+            "min": 0.0,
+            "max": 1.0,
+            "step": 0.01,
+            "widgetType": "slider"
+        },
+        "threshold_max": {
+            "type": "float",
+            "value": 0.8,
+            "min": 0.0,
+            "max": 1.0,
+            "step": 0.01,
+            "widgetType": "slider"
+        },
+        "randomness": {
+            "type": "float",
+            "value": 0.0,
+            "min": 0.0,
+            "max": 1.0,
+            "step": 0.01,
+            "widgetType": "slider"
+        },
+        "angle": {
+            "type": "float",
+            "value": 0.0,
+            "min": 0.0,
+            "max": 360.0,
+            "step": 1.0,
+            "widgetType": "slider"
+        },
+        "strip_width": {
+            "type": "int",
+            "value": 5,
+            "min": 1,
+            "max": 100,
+            "step": 1,
+            "widgetType": "slider"
+        },
+        "strip_spacing": {
+            "type": "int",
+            "value": 0,
+            "min": 0,
+            "max": 50,
+            "step": 1,
+            "widgetType": "slider"
+        },
+        "pulling_distance": {
+            "type": "float",
+            "value": 1.0,
+            "min": 0.1,
+            "max": 10.0,
+            "step": 0.1,
+            "widgetType": "slider"
+        },
+        "char_length": {
+            "type": "int",
+            "value": 10,
+            "min": 1,
+            "max": 100,
+            "step": 1,
+            "widgetType": "slider"
+        },
+        "sorting_style": {
+            "type": "int",
+            "value": 0,
+            "min": 0,
+            "max": 2,
+            "step": 1,
+            "widgetType": "dropdown"
+        }
+    },
+    "paramDescriptions": {
+        "threshold_min": "Minimum pixel lightness to be sorted.",
+        "threshold_max": "Maximum pixel lightness to be sorted.",
+        "randomness": "Percentage of intervals that remain unsorted.",
+        "angle": "Angle for pixel sorting (0 = horizontal).",
+        "strip_width": "Width of each sorting strip.",
+        "strip_spacing": "Space between pixel-sorted strips.",
+        "pulling_distance": "How far the pixels are pulled from their original position.",
+        "char_length": "Characteristic length for intervals.",
+        "sorting_style": "Defines sorting based on Hue (0), Saturation (1), or Lightness (2)."
+    }
+}

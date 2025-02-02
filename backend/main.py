@@ -1,0 +1,1619 @@
+import os
+import sys
+import uuid
+import shutil
+import numpy as np
+from typing import List, Optional, Dict, Any
+from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field, validator
+import uvicorn
+import base64
+import cv2
+import torch
+import threading
+import time
+from pathlib import Path
+import logging
+from PIL import Image
+import colorsys
+import importlib.util
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import json
+
+from fastapi.responses import FileResponse
+
+# Initialize logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("app.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# Add the SAM2 directory to sys.path to import sam2
+SAM2_PATH = os.getenv('SAM2_PATH', '/mnt/c/Users/cryst/segment-anything-2')  # Update this path as needed
+if SAM2_PATH not in sys.path:
+    sys.path.append(SAM2_PATH)
+
+try:
+    from sam2.build_sam import build_sam2_video_predictor
+    from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
+except ImportError as e:
+    logger.error(f"Failed to import SAM2 modules: {e}")
+    sys.exit(1)
+
+# Initialize FastAPI app
+app = FastAPI()
+
+# Enable CORS (Adjust origins as needed for production)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Change this to specific origins in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Define the path to the 'videos' directory
+BASE_DIR = Path(__file__).resolve().parent
+VIDEOS_DIR = BASE_DIR / "videos"
+
+# Verify that the 'videos' directory exists
+if not VIDEOS_DIR.exists():
+    try:
+        VIDEOS_DIR.mkdir(parents=True, exist_ok=True)
+        logger.info(f"'videos' directory created at {VIDEOS_DIR}")
+    except Exception as e:
+        logger.error(f"Failed to create 'videos' directory at {VIDEOS_DIR}: {e}")
+        raise
+
+# Mount the 'videos' directory to serve static files
+app.mount("/videos", StaticFiles(directory=str(VIDEOS_DIR)), name="videos")
+
+# Global Variables
+state_lock = threading.Lock()
+video_states = {}  # Stores state per video_id
+
+# SAM2 Model Initialization
+MODEL_CFG = "sam2_hiera_s.yaml"  # Update to small model if needed
+SAM2_CHECKPOINT = "/mnt/c/Users/cryst/segment-anything-2/checkpoints/sam2_hiera_small.pt"  # Update to small model checkpoint
+SAM2_CONFIG_PATH = "/mnt/c/Users/cryst/segment-anything-2/sam2_configs"  # Update as needed
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+# Log CUDA availability
+if torch.cuda.is_available():
+    logger.info("CUDA is available. Models will be loaded onto the GPU.")
+else:
+    logger.warning("CUDA is not available. Models will be loaded onto the CPU.")
+
+try:
+    predictor = build_sam2_video_predictor(
+        config_file=MODEL_CFG,
+        ckpt_path=SAM2_CHECKPOINT,
+        device=DEVICE,
+        config_path=SAM2_CONFIG_PATH,
+    )
+    mask_generator = SAM2AutomaticMaskGenerator(
+        model=predictor,
+        points_per_side=64,
+        points_per_batch=128,
+        pred_iou_thresh=0.7,
+        stability_score_thresh=0.92,
+        stability_score_offset=0.7,
+        crop_n_layers=1,
+        box_nms_thresh=0.7,
+        crop_n_points_downscale_factor=2,
+        min_mask_region_area=25.0,
+        use_m2m=True,
+    )
+    logger.info(f"SAM2 models initialized successfully on device: {DEVICE}.")
+except Exception as e:
+    logger.error(f"Failed to initialize SAM2 models: {e}")
+    sys.exit(1)
+
+# Directories for presets
+COLOR_PRESETS_DIR = BASE_DIR / "fx_color_presets"
+COLOR_PRESETS_DIR.mkdir(exist_ok=True)
+
+EFFECT_STACK_PRESETS_DIR = BASE_DIR / "effects_stack_presets"
+EFFECT_STACK_PRESETS_DIR.mkdir(exist_ok=True)
+
+# Background Task Executor
+executor = ThreadPoolExecutor(max_workers=4)
+
+# Pydantic Models
+class PromptData(BaseModel):
+    video_id: str
+    frame_idx: int = Field(..., ge=0)
+    obj_id: int = Field(..., ge=1)
+    points: Optional[List[List[float]]] = None
+    labels: Optional[List[int]] = None
+    box: Optional[List[float]] = None
+    clear_old_prompts: Optional[bool] = False
+    normalize_coords: Optional[bool] = False
+
+    @validator('labels', each_item=True)
+    def validate_labels(cls, v):
+        if v not in [0, 1]:
+            raise ValueError('Each label must be 0 or 1')
+        return v
+
+class Effect(BaseModel):
+    name: str
+    params: Dict[str, Any]
+    muted: bool = False
+    blend_mode: str = "Normal"
+    opacity: float = 1.0
+    radius: int = 0
+    expand: int = 0
+
+    def dict_for_effect(self) -> Dict[str, Any]:
+        """Convert effect to a dictionary suitable for effect functions"""
+        return {
+            **self.params,
+            "opacity": self.opacity,
+            "radius": self.radius,
+            "expand": self.expand,
+        }
+class ApplyEffectsRequest(BaseModel):
+    video_id: str
+    obj_id: Optional[int] = None
+    effects: Optional[List[Effect]] = None
+    objects: Optional[List[Dict[str, Any]]] = None
+    feather_params: Dict[str, Any]
+    frame_idx: Optional[int] = None
+    apply_to_all_frames: bool = False
+    preview_mode: str = 'all'
+    reset_frame: bool = False
+    original_frame_hash: Optional[str] = None
+    
+class ExportData(BaseModel):
+    video_id: str
+    export_options: Optional[Dict] = None  # Options for export components
+
+class DeleteObjectData(BaseModel):
+    video_id: str
+    obj_id: int = Field(..., ge=1)
+
+class ResetStateData(BaseModel):
+    video_id: str
+
+class MuteObjectData(BaseModel):
+    video_id: str
+    obj_id: int = Field(..., ge=1)
+    muted: bool
+
+class EffectUploadData(BaseModel):
+    video_id: str
+    effect_name: str
+    effect_code: str
+    effect_config: Optional[str] = None
+
+# VideoState Class
+class VideoState:
+    def __init__(self, video_id: str, video_dir: str, video_filename: str, fps: float, width: int, height: int):
+        self.video_id = video_id
+        self.video_dir = video_dir
+        self.video_filename = video_filename
+        self.original_video_path = os.path.join(video_dir, video_filename)
+        self.fps = fps  # Original FPS
+        self.width = width  # Original Width
+        self.height = height  # Original Height
+        self.predictor_states_by_obj = {}  # Dict[obj_id] = predictor_state
+        self.masks_by_frame = {}
+        self.adjusted_masks_by_frame = {}
+        self.prompts_by_obj = {}
+        self.tracking_complete = False
+        self.last_access = time.time()
+        self.obj_colors = {}
+        self.effects_by_obj = {}
+        self.muted_objects = set()
+        self.fx_scripts = {}  # Loaded FX scripts
+        self.cache = {}  # Caching mechanism
+        self.load_fx_scripts()  # Initialize FX scripts
+
+    def load_fx_scripts(self):
+        global_fx_dir = Path(BASE_DIR) / "FX"
+        self.fx_scripts = {}  # Reset fx_scripts
+
+        # Load effects from global FX directory
+        if global_fx_dir.exists():
+            for fx_folder in global_fx_dir.iterdir():
+                if fx_folder.is_dir():
+                    self._load_fx_script(fx_folder)
+
+    def _load_fx_script(self, fx_folder: Path):
+        script_path = fx_folder / "script.py"
+        config_path = fx_folder / "config.json"
+
+        if script_path.exists() and config_path.exists():
+            spec = importlib.util.spec_from_file_location(fx_folder.name, str(script_path))
+            module = importlib.util.module_from_spec(spec)
+
+            try:
+                spec.loader.exec_module(module)
+                if hasattr(module, "apply_effect"):
+                    # Load configuration
+                    with open(config_path, 'r') as f:
+                        config = json.load(f)
+
+                    # Check if config matches the apply_effect signature
+                    default_params = config.get("defaultParams", {})
+                    effect_function_params = module.apply_effect.__code__.co_varnames
+
+                    # Ensure 'frame' is the first parameter
+                    if "frame" not in effect_function_params:
+                        logger.error(f"apply_effect function in {script_path} does not have 'frame' as its first argument.")
+                        return
+
+                    # Validate defaultParams against apply_effect function signature
+                    for param_name in default_params.keys():
+                        if param_name not in effect_function_params:
+                            logger.warning(f"Parameter '{param_name}' defined in {config_path} is not used by apply_effect in {script_path}.")
+
+                    # Store the effect script and config
+                    self.fx_scripts[fx_folder.name] = {
+                        'function': module.apply_effect,
+                        'config': config
+                    }
+                    logger.info(f"Loaded effect script: {fx_folder.name} with matching parameters")
+                else:
+                    logger.warning(f"No apply_effect function in {script_path}")
+            except Exception as e:
+                logger.error(f"Failed to load effect script {script_path}: {e}")
+        else:
+            logger.warning(f"Effect script or config not found: {script_path} or {config_path}")
+
+# Helper Functions
+
+def run_tracking(video_id: str):
+    with state_lock:
+        if video_id not in video_states:
+            logger.error(f"Video {video_id} not found during tracking.")
+            return
+        video_state = video_states[video_id]
+        video_state.tracking_complete = False
+        logger.info(f"Tracking started for video {video_id}")
+
+    try:
+        for obj_id, predictor_state in video_state.predictor_states_by_obj.items():
+            # Run tracking for this object
+            for out_frame_idx, out_obj_ids, masks in predictor.propagate_in_video(predictor_state):
+                # masks is a list of masks, one per obj_id (should be only one obj_id here)
+                mask = masks[0]
+                if isinstance(mask, torch.Tensor):
+                    mask = mask.cpu().numpy()
+                mask_np = (mask > 0).astype(np.uint8) * 255
+                with state_lock:
+                    if out_frame_idx not in video_state.masks_by_frame:
+                        video_state.masks_by_frame[out_frame_idx] = {}
+                    video_state.masks_by_frame[out_frame_idx][obj_id] = mask_np
+                    logger.debug(f"Stored mask for object {obj_id} in frame {out_frame_idx}")
+
+        with state_lock:
+            video_state.tracking_complete = True
+            logger.info(f"Tracking complete for video {video_id}")
+
+    except Exception as e:
+        logger.error(f"Error during tracking for video {video_id}: {e}")
+        with state_lock:
+            video_state.tracking_complete = False
+
+def cleanup_expired_videos(expiration_seconds: int = 3600):
+    while True:
+        with state_lock:
+            current_time = time.time()
+            expired_videos = [
+                video_id for video_id, state in video_states.items()
+                if current_time - state.last_access > expiration_seconds
+            ]
+            for video_id in expired_videos:
+                video_dir = video_states[video_id].video_dir
+                try:
+                    shutil.rmtree(video_dir)
+                    del video_states[video_id]
+                    logger.info(f"Cleaned up expired video {video_id}")
+                except Exception as e:
+                    logger.error(f"Failed to clean up video {video_id}: {e}")
+        time.sleep(600)  # Run cleanup every 10 minutes
+
+# Start cleanup thread
+cleanup_thread = threading.Thread(target=cleanup_expired_videos, daemon=True)
+cleanup_thread.start()
+
+def non_max_suppression(masks: List[np.ndarray], iou_threshold: float = 0.5) -> List[np.ndarray]:
+    if not masks:
+        return []
+    areas = [np.sum(mask) for mask in masks]
+    sorted_indices = np.argsort(areas)[::-1]
+    keep = []
+    while sorted_indices.size > 0:
+        current = sorted_indices[0]
+        keep.append(current)
+        if sorted_indices.size == 1:
+            break
+        rest = sorted_indices[1:]
+        ious = np.array([compute_iou(masks[current], masks[i]) for i in rest])
+        sorted_indices = sorted_indices[1:][ious < iou_threshold]
+    return [masks[i] for i in keep]
+
+def compute_iou(mask1: np.ndarray, mask2: np.ndarray) -> float:
+    intersection = np.logical_and(mask1, mask2).sum()
+    union = np.logical_or(mask1, mask2).sum()
+    if union == 0:
+        return 0.0
+    return intersection / union
+
+def load_image(frame_idx: int, video_dir: str) -> np.ndarray:
+    frame_path = os.path.join(video_dir, "frames", f"{frame_idx:05d}.jpg")
+    if not os.path.exists(frame_path):
+        raise HTTPException(status_code=404, detail=f"Frame {frame_idx} not found")
+    image = Image.open(frame_path).convert("RGB")
+    image = np.array(image)
+    return image
+
+def extract_frames(video_path: str, output_dir: str):
+    try:
+        import ffmpeg
+    except ImportError:
+        logger.error("ffmpeg-python is not installed. Install it using 'pip install ffmpeg-python'.")
+        raise HTTPException(status_code=500, detail="ffmpeg-python is not installed.")
+    try:
+        (
+            ffmpeg
+            .input(video_path)
+            .output(os.path.join(output_dir, '%05d.jpg'), start_number=0, qscale=2)
+            .overwrite_output()
+            .run()
+        )
+        logger.info(f"Frames extracted to {output_dir}")
+    except ffmpeg.Error as e:
+        stderr_output = e.stderr.decode() if e.stderr else 'No stderr available'
+        logger.error(f"ffmpeg error: {stderr_output}")
+        raise HTTPException(status_code=500, detail="Frame extraction failed.")
+
+def apply_feathering(mask: np.ndarray, params: Dict) -> np.ndarray:
+    import cv2
+    import numpy as np
+
+    radius = params.get('radius', 0)
+    expand = params.get('expand', 0)
+    opacity = params.get('opacity', 1.0)
+
+    # Clone the mask to avoid modifying the original
+    feathered_mask = mask.copy()
+
+    # Expand or contract the mask
+    if expand != 0:
+        kernel_size = max(1, int(abs(expand)))
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+        if expand > 0:
+            feathered_mask = cv2.dilate(feathered_mask, kernel, iterations=1)
+        else:
+            feathered_mask = cv2.erode(feathered_mask, kernel, iterations=1)
+
+    # Apply Gaussian blur to feather the edges
+    if radius > 0:
+        feathered_mask = cv2.GaussianBlur(feathered_mask, (0, 0), radius)
+
+    # Adjust opacity
+    feathered_mask = feathered_mask * opacity
+
+    # Ensure mask is in [0,1] range
+    feathered_mask = np.clip(feathered_mask, 0, 1)
+
+    return feathered_mask
+
+def apply_blend_mode(base_image: np.ndarray, blend_image: np.ndarray, blend_mode: str) -> np.ndarray:
+    import numpy as np
+
+    # Ensure images are in float32 format
+    base_image = base_image.astype(np.float16)
+    blend_image = blend_image.astype(np.float16)
+
+    if blend_mode == 'Normal':
+        return blend_image
+    elif blend_mode == 'Multiply':
+        return base_image * blend_image
+    elif blend_mode == 'Screen':
+        return 1 - (1 - base_image) * (1 - blend_image)
+    elif blend_mode == 'Overlay':
+        return np.where(base_image < 0.5, 2 * base_image * blend_image, 1 - 2 * (1 - base_image) * (1 - blend_image))
+    elif blend_mode == 'Add':
+        return np.clip(base_image + blend_image, 0, 1)
+    elif blend_mode == 'Subtract':
+        return np.clip(base_image - blend_image, 0, 1)
+    # Add more blend modes as needed
+    else:
+        logger.warning(f"Blend mode '{blend_mode}' not recognized. Using 'Normal' blend mode.")
+        return blend_image
+
+def get_param(name, default, param_type, params, min_val=None, max_val=None):
+    value = params.get(name, default)
+    try:
+        value = param_type(value)
+        if min_val is not None:
+            value = max(min_val, value)
+        if max_val is not None:
+            value = min(max_val, value)
+    except (ValueError, TypeError):
+        # Log warning if logging is set up
+        logger.warning(f"Invalid value for {name}. Using default: {default}")
+        value = default
+    return value
+
+def blend_images(base_image, overlay_image, blend_mode):
+    if blend_mode == 'Normal':
+        return overlay_image
+    elif blend_mode == 'Multiply':
+        return base_image * overlay_image
+    elif blend_mode == 'Screen':
+        return 1 - (1 - base_image) * (1 - overlay_image)
+    elif blend_mode == 'Overlay':
+        return np.where(base_image < 0.5, 2 * base_image * overlay_image, 1 - 2 * (1 - base_image) * (1 - overlay_image))
+    elif blend_mode == 'Darken':
+        return np.minimum(base_image, overlay_image)
+    elif blend_mode == 'Lighten':
+        return np.maximum(base_image, overlay_image)
+    elif blend_mode == 'Color Dodge':
+        return np.where(overlay_image == 1, 1, np.minimum(base_image / (1 - overlay_image), 1))
+    elif blend_mode == 'Color Burn':
+        return np.where(overlay_image == 0, 0, np.maximum(1 - (1 - base_image) / overlay_image, 0))
+    elif blend_mode == 'Hard Light':
+        return np.where(overlay_image < 0.5, 2 * base_image * overlay_image, 1 - 2 * (1 - base_image) * (1 - overlay_image))
+    elif blend_mode == 'Soft Light':
+        return (1 - 2 * overlay_image) * base_image ** 2 + 2 * overlay_image * base_image
+    elif blend_mode == 'Difference':
+        return np.abs(base_image - overlay_image)
+    elif blend_mode == 'Exclusion':
+        return base_image + overlay_image - 2 * base_image * overlay_image
+    # Add more blending modes as needed
+    else:
+        return overlay_image  # Default to normal
+
+def apply_effects_to_frame(frame: np.ndarray, effects_data: List[Dict], video_state) -> np.ndarray:
+    """
+    Apply multiple objects' effects to a single frame with proper feathering at both global and effect levels
+    """
+    if frame is None:
+        logger.error("Received null frame")
+        return frame
+    
+    # Create a composite result frame starting with the original
+    result_frame = frame.copy()
+    
+    # Process each object's effects
+    for effect_data in effects_data:
+        if not effect_data:
+            continue
+            
+        obj_id = effect_data.get('id')
+        effects = effect_data.get('effects', [])
+        global_feather_params = effect_data.get('feather_params', {})
+        mask = effect_data.get('mask')
+        
+        # Skip if missing required data
+        if not all([obj_id, effects, global_feather_params, mask is not None]):
+            logger.debug(f"Skipping object {obj_id} - missing required data")
+            continue
+        
+        # Ensure mask has correct shape
+        if mask.ndim == 3:
+            mask = mask.squeeze()
+            
+        try:
+            # Apply global feathering to create base mask
+            global_mask = apply_feathering(mask.copy(), global_feather_params)
+            if global_mask is None:
+                continue
+                
+            if global_mask.ndim == 2:
+                global_mask = global_mask[:, :, np.newaxis]
+            
+            # Process effects for this object
+            obj_frame = result_frame.copy()
+            
+            for effect in effects:
+                if getattr(effect, 'muted', True):
+                    continue
+                    
+                effect_name = getattr(effect, 'name', '')
+                effect_script = video_state.fx_scripts.get(effect_name)
+                
+                if not effect_script or 'function' not in effect_script:
+                    continue
+                    
+                try:
+                    # Get effect-specific feathering parameters
+                    effect_feather_params = {
+                        'radius': getattr(effect, 'radius', 0),
+                        'expand': getattr(effect, 'expand', 0),
+                        'opacity': getattr(effect, 'opacity', 1.0)
+                    }
+                    
+                    # Apply effect-specific feathering to create effect mask
+                    effect_mask = apply_feathering(mask.copy(), effect_feather_params)
+                    if effect_mask is None:
+                        continue
+                        
+                    if effect_mask.ndim == 2:
+                        effect_mask = effect_mask[:, :, np.newaxis]
+                    
+                    # Combine global and effect masks
+                    combined_mask = global_mask * effect_mask
+                    
+                    # Get effect function and parameters
+                    effect_func = effect_script['function']
+                    effect_params = getattr(effect, 'params', {}).copy() or {}
+                    
+                    # Add mask parameter if needed
+                    import inspect
+                    sig = inspect.signature(effect_func)
+                    if 'mask' in sig.parameters:
+                        effect_params['mask'] = mask
+                    elif 'sam2_mask' in sig.parameters:
+                        effect_params['sam2_mask'] = mask
+                    
+                    # Apply the effect
+                    effect_result = effect_func(obj_frame.copy(), **effect_params)
+                    if effect_result is None:
+                        continue
+                    
+                    # Blend using combined mask
+                    obj_frame = obj_frame * (1 - combined_mask) + effect_result * combined_mask
+                    
+                except Exception as e:
+                    logger.error(f"Error applying effect {effect_name} to object {obj_id}: {str(e)}")
+                    continue
+            
+            # Update result frame with this object's effects
+            result_frame = obj_frame
+            
+        except Exception as e:
+            logger.error(f"Error processing effects for object {obj_id}: {str(e)}")
+            continue
+    
+    return result_frame
+
+
+def compile_video(frames_dir: str, output_video_path: str, fps: float, width: int, height: int, original_video_path: str):
+    try:
+        import ffmpeg
+    except ImportError:
+        logger.error("ffmpeg-python is not installed. Install it using 'pip install ffmpeg-python'.")
+        raise HTTPException(status_code=500, detail="ffmpeg-python is not installed.")
+    
+    try:
+        input_frames = ffmpeg.input(os.path.join(frames_dir, '%05d.jpg'), framerate=fps)
+        input_audio = ffmpeg.input(original_video_path).audio
+
+        (
+            ffmpeg
+            .output(
+                input_frames,
+                input_audio,
+                output_video_path,
+                pix_fmt='yuv420p',
+                vcodec='libx264',          # Use H.264 codec
+                crf=18,                    # Quality parameter (lower is better)
+                preset='slow',             # Encoding speed vs. compression
+                s=f"{width}x{height}",     # Ensure original resolution
+                **{'b:v': '5000k'},        # Adjust bitrate, corrected to 'b:v'
+                acodec='copy',             # Copy audio without re-encoding
+                shortest=None,             # Use 'shortest' as a flag by setting it to None
+            )
+            .overwrite_output()
+            .run(capture_stdout=True, capture_stderr=True)  # Capture stderr for detailed errors
+        )
+        logger.info(f"Video compiled successfully at {output_video_path} with FPS={fps}, Resolution={width}x{height}")
+    except ffmpeg.Error as e:
+        stderr_output = e.stderr.decode() if e.stderr else 'No stderr available'
+        logger.error(f"ffmpeg error: {stderr_output}")
+        raise HTTPException(status_code=500, detail=f"Video compilation failed: {stderr_output}")
+    except Exception as e:
+        logger.error(f"Unexpected error during video compilation: {e}")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred during video compilation.")
+
+def assign_color(obj_id: int, existing_colors: List[tuple]) -> tuple:
+    hue = (obj_id * 0.618033988749895) % 1
+    rgb = colorsys.hsv_to_rgb(hue, 0.8, 0.95)
+    return tuple(int(x * 255) for x in rgb)
+
+def overlay_mask(frame: np.ndarray, mask: np.ndarray, color: tuple, opacity: float) -> np.ndarray:
+    colored_mask = np.zeros_like(frame)
+    colored_mask[:] = color
+    mask_overlay = cv2.addWeighted(frame, 1, colored_mask, opacity, 0, dtype=cv2.CV_8U)
+    return np.where(mask[:, :, np.newaxis] == 255, mask_overlay, frame)
+
+def get_image_size(frames_dir: str) -> int:
+    first_frame_path = os.path.join(frames_dir, "00000.jpg")
+    if not os.path.exists(first_frame_path):
+        logger.error(f"First frame not found at {first_frame_path}")
+        raise HTTPException(status_code=404, detail="First frame not found.")
+    with Image.open(first_frame_path) as img:
+        width, height = img.size
+    image_size = max(width, height)
+    return image_size
+
+def export_masks_to_directory(video_state: 'VideoState'):
+    masks_dir = os.path.join(video_state.video_dir, "Masks")
+    os.makedirs(masks_dir, exist_ok=True)
+    frames_dir = os.path.join(video_state.video_dir, "frames")
+    frame_files = sorted([f for f in os.listdir(frames_dir) if f.endswith('.jpg')])
+    num_frames = len(frame_files)
+
+    logger.info(f"Starting mask export for {num_frames} frames")
+
+    for frame_idx in range(num_frames):
+        frame_masks = video_state.masks_by_frame.get(frame_idx, {})
+        if not frame_masks:
+            logger.info(f"No masks for frame {frame_idx}, skipping.")
+            continue
+
+        frame_path = os.path.join(frames_dir, f"{frame_idx:05d}.jpg")
+        frame = cv2.imread(frame_path)
+        if frame is None:
+            logger.warning(f"Frame {frame_idx} not found at {frame_path}")
+            continue
+        
+        frame_height, frame_width = frame.shape[:2]
+        logger.debug(f"Frame {frame_idx} dimensions: {frame_width}x{frame_height}")
+
+        if frame_width <= 0 or frame_height <= 0:
+            logger.error(f"Invalid frame dimensions for frame {frame_idx}: {frame_width}x{frame_height}")
+            continue
+
+        combined_mask = np.zeros((frame_height, frame_width), dtype=np.uint8)
+        for obj_id, mask in frame_masks.items():
+            if mask is None or mask.size == 0:
+                logger.warning(f"Empty mask for object {obj_id} in frame {frame_idx}")
+                continue
+
+            if not isinstance(mask, np.ndarray):
+                if isinstance(mask, torch.Tensor):
+                    mask = mask.cpu().numpy()
+                else:
+                    logger.warning(f"Unsupported mask type for object {obj_id} in frame {frame_idx}")
+                    continue
+
+            mask = mask.astype(np.uint8)
+            logger.debug(f"Mask shape for object {obj_id} in frame {frame_idx}: {mask.shape}")
+
+            if mask.shape != (frame_height, frame_width):
+                try:
+                    mask = cv2.resize(mask, (frame_width, frame_height), interpolation=cv2.INTER_NEAREST)
+                except cv2.error as e:
+                    logger.error(f"Failed to resize mask for object {obj_id} in frame {frame_idx}: {e}")
+                    continue
+
+            combined_mask = np.maximum(combined_mask, mask)
+
+        if combined_mask.max() == 0:
+            logger.warning(f"No valid masks for frame {frame_idx}")
+            continue
+
+        colored_mask = np.zeros((frame_height, frame_width, 3), dtype=np.uint8)
+        colored_mask[combined_mask > 0] = (255, 255, 255)
+
+        mask_path = os.path.join(masks_dir, f"{frame_idx:05d}.png")
+        cv2.imwrite(mask_path, colored_mask)
+        logger.info(f"Exported mask for frame {frame_idx}")
+
+    logger.info(f"Mask export completed. Exported masks saved in {masks_dir}")
+
+# API Endpoints
+
+
+
+@app.get("/")
+async def read_root():
+    return {"message": "Welcome to the SAM2 VFX Video Editor Backend!"}
+
+@app.post("/upload")
+async def upload_video(file: UploadFile = File(...)):
+    if not file.filename.lower().endswith(('.mp4', '.avi', '.mov', '.mkv')):
+        logger.warning(f"Unsupported file type: {file.filename}")
+        raise HTTPException(status_code=400, detail="Unsupported file type. Please upload a video file.")
+    video_id = str(uuid.uuid4())
+    video_dir = os.path.join(VIDEOS_DIR, video_id)
+    os.makedirs(video_dir, exist_ok=True)
+    video_path = os.path.join(video_dir, file.filename)
+    with open(video_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    logger.info(f"Video {file.filename} uploaded as {video_id}")
+    output_frames_dir = os.path.join(video_dir, "frames")
+    os.makedirs(output_frames_dir, exist_ok=True)
+    extract_frames(video_path, output_frames_dir)
+    try:
+        image_size = get_image_size(output_frames_dir)
+        logger.info(f"Image size for video {video_id}: {image_size}")
+    except HTTPException as e:
+        logger.error(f"Failed to get image size for video {video_id}: {e.detail}")
+        raise
+    
+    # Extract Video Metadata
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        logger.error(f"Failed to open video {video_path} for metadata extraction.")
+        raise HTTPException(status_code=500, detail="Failed to process video.")
+    
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    cap.release()
+    
+    logger.info(f"Extracted metadata for video {video_id}: FPS={fps}, Width={width}, Height={height}")
+    
+    with state_lock:
+        video_states[video_id] = VideoState(
+            video_id=video_id,
+            video_dir=video_dir,
+            video_filename=file.filename,
+            fps=fps,
+            width=width,
+            height=height
+        )
+    logger.info(f"Video state created for {video_id}")
+    return {"message": "Video uploaded and frames extracted", "video_id": video_id}
+
+@app.get("/get_frames/{video_id}")
+async def get_frames(video_id: str):
+    with state_lock:
+        if video_id not in video_states:
+            logger.warning(f"Requested frames for non-existent video {video_id}")
+            raise HTTPException(status_code=404, detail="Video not found")
+        video_state = video_states[video_id]
+        video_state.last_access = time.time()
+    frames_dir = os.path.join(video_state.video_dir, "frames")
+    if not os.path.exists(frames_dir):
+        logger.error(f"Frames directory not found for video {video_id}")
+        raise HTTPException(status_code=404, detail="Frames directory not found")
+    frame_files = sorted([
+        p for p in os.listdir(frames_dir)
+        if os.path.splitext(p)[-1].lower() in [".jpg", ".jpeg"]
+    ], key=lambda p: int(os.path.splitext(p)[0]))
+    frame_urls = [f"/videos/{video_state.video_id}/frames/{frame}" for frame in frame_files]
+    logger.info(f"Retrieved {len(frame_urls)} frames for video {video_id}")
+    return {"frames": frame_urls}
+
+@app.post("/add_prompts")
+async def add_prompts(data: PromptData):
+    with state_lock:
+        if data.video_id not in video_states:
+            logger.warning(f"Attempted to add prompts to non-existent video {data.video_id}")
+            raise HTTPException(status_code=404, detail="Video not found")
+        video_state = video_states[data.video_id]
+        video_state.last_access = time.time()
+
+    frame_idx, obj_id = data.frame_idx, data.obj_id
+
+    # Initialize predictor state per object
+    if obj_id not in video_state.predictor_states_by_obj:
+        predictor_state = predictor.init_state(video_path=os.path.join(video_state.video_dir, "frames"))
+        video_state.predictor_states_by_obj[obj_id] = predictor_state
+        logger.info(f"Initialized predictor state for object {obj_id} in video {data.video_id}")
+    else:
+        predictor_state = video_state.predictor_states_by_obj[obj_id]
+
+    # Clear old prompts if required or initialize for the first time
+    if data.clear_old_prompts or obj_id not in video_state.prompts_by_obj:
+        video_state.prompts_by_obj[obj_id] = {'points': [], 'labels': [], 'box': None}
+        logger.info(f"Cleared old prompts for object {obj_id} in video {data.video_id}")
+
+    # Set new prompts
+    if data.points is not None and data.labels is not None:
+        video_state.prompts_by_obj[obj_id]['points'] = data.points
+        video_state.prompts_by_obj[obj_id]['labels'] = data.labels
+        logger.info(f"Set points and labels for object {obj_id} in video {data.video_id}")
+    if data.box is not None:
+        video_state.prompts_by_obj[obj_id]['box'] = data.box
+        logger.info(f"Set box for object {obj_id} in video {data.video_id}")
+
+    prompts = video_state.prompts_by_obj[obj_id]
+    obj_points = np.array(prompts['points'], dtype=np.float32) if prompts['points'] else None
+    obj_labels = np.array(prompts['labels'], dtype=np.int32) if prompts['labels'] else None
+    obj_box = np.array(prompts['box'], dtype=np.float32) if prompts['box'] else None
+
+    # Apply prompts to the predictor
+    try:
+        _, out_obj_ids, out_mask_logits = predictor.add_new_points_or_box(
+            inference_state=predictor_state,
+            frame_idx=frame_idx,
+            obj_id=obj_id,
+            points=obj_points,
+            labels=obj_labels,
+            box=obj_box,
+        )
+        logger.info(f"Added prompts for object {obj_id} in frame {frame_idx}")
+    except Exception as e:
+        logger.error(f"Failed to add prompts for video {data.video_id}, frame {frame_idx}, object {obj_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to add prompts: {str(e)}")
+
+    # Process mask logits and store them
+    try:
+        mask = out_mask_logits[0].cpu().numpy()
+        if mask.ndim == 3 and mask.shape[0] == 1:
+            mask = np.squeeze(mask, axis=0)
+        mask_binary = (mask > 0).astype(np.uint8) * 255
+        logger.debug(f"Generated mask for object {obj_id} in frame {frame_idx}: shape={mask_binary.shape}")
+        with state_lock:
+            if frame_idx not in video_state.masks_by_frame:
+                video_state.masks_by_frame[frame_idx] = {}
+            video_state.masks_by_frame[frame_idx][obj_id] = mask_binary
+            logger.debug(f"Stored mask for object {obj_id} in frame {frame_idx}")
+    except Exception as e:
+        logger.error(f"Failed to process mask for video {data.video_id}, frame {frame_idx}, object {obj_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to process mask: {str(e)}")
+
+    return {"frame_idx": frame_idx, "obj_ids": [obj_id]}
+
+@app.get("/get_masks/{video_id}/{frame_idx}")
+async def get_masks(video_id: str, frame_idx: int):
+    with state_lock:
+        if video_id not in video_states:
+            logger.warning(f"Requested masks for non-existent video {video_id}")
+            raise HTTPException(status_code=404, detail="Video not found")
+        video_state = video_states[video_id]
+        video_state.last_access = time.time()
+    frame_idx = int(frame_idx)
+    if frame_idx in video_state.masks_by_frame:
+        obj_masks = video_state.masks_by_frame[frame_idx]
+        serializable_masks = {}
+        for obj_id, mask in obj_masks.items():
+            if obj_id not in video_state.muted_objects:
+                frames_dir = os.path.join(video_state.video_dir, "frames")
+                frame_path = os.path.join(frames_dir, f"{frame_idx:05d}.jpg")
+                frame = cv2.imread(frame_path)
+                if frame is None:
+                    logger.warning(f"Frame {frame_idx} not found at {frame_path}")
+                    continue
+                h, w = frame.shape[:2]
+                logger.debug(f"Loaded frame {frame_idx}: height={h}, width={w}")
+                # Ensure mask has the correct shape
+                if mask.ndim == 3 and mask.shape[0] == 1:
+                    mask = np.squeeze(mask, axis=0)
+
+                if mask.shape != (h, w):
+                    logger.warning(
+                        f"Mask shape {mask.shape} does not match frame dimensions ({h}, {w}). Attempting to resize."
+                    )
+                    try:
+                        mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
+                        logger.debug(f"Resized mask for object {obj_id} in frame {frame_idx} to ({h}, {w})")
+                    except cv2.error as e:
+                        logger.error(f"Failed to resize mask for frame {frame_idx}, object {obj_id}: {e}")
+                        continue
+                color = video_state.obj_colors.get(obj_id, assign_color(obj_id, list(video_state.obj_colors.values())))
+                video_state.obj_colors[obj_id] = color
+                colored_mask = np.zeros((h, w, 3), dtype=np.uint8)
+                colored_mask[mask > 0] = color
+                success, buffer = cv2.imencode('.png', colored_mask)
+                if not success:
+                    logger.error(f"Failed to encode mask for frame {frame_idx}, object {obj_id}")
+                    continue
+                mask_png = base64.b64encode(buffer).decode('utf-8')
+                serializable_masks[str(obj_id)] = mask_png
+                logger.debug(f"Encoded mask for object {obj_id} in frame {frame_idx}")
+        logger.info(f"Retrieved masks for frame {frame_idx} in video {video_id}")
+        return {"frame_idx": frame_idx, "masks": serializable_masks}
+    else:
+        logger.info(f"No masks found for frame {frame_idx} in video {video_id}")
+        return {"frame_idx": frame_idx, "masks": {}}
+
+@app.post("/delete_object")
+async def delete_object(data: DeleteObjectData):
+    with state_lock:
+        if data.video_id not in video_states:
+            logger.warning(f"Attempted to delete object from non-existent video {data.video_id}")
+            raise HTTPException(status_code=404, detail="Video not found")
+        video_state = video_states[data.video_id]
+        video_state.last_access = time.time()
+        obj_id = data.obj_id
+        if obj_id in video_state.prompts_by_obj:
+            del video_state.prompts_by_obj[obj_id]
+            logger.info(f"Removed prompts for object {obj_id} in video {data.video_id}")
+        if obj_id in video_state.predictor_states_by_obj:
+            del video_state.predictor_states_by_obj[obj_id]
+            logger.info(f"Removed predictor state for object {obj_id} in video {data.video_id}")
+        frames_to_update = []
+        for frame_idx, obj_masks in video_state.masks_by_frame.items():
+            if obj_id in obj_masks:
+                del obj_masks[obj_id]
+                frames_to_update.append(frame_idx)
+                logger.debug(f"Removed mask for object {obj_id} in frame {frame_idx}")
+        for frame_idx in frames_to_update:
+            if not video_state.masks_by_frame[frame_idx]:
+                del video_state.masks_by_frame[frame_idx]
+                logger.debug(f"Deleted empty mask entry for frame {frame_idx} in video {data.video_id}")
+        if obj_id in video_state.effects_by_obj:
+            del video_state.effects_by_obj[obj_id]
+            logger.info(f"Removed effects for object {obj_id} in video {data.video_id}")
+        if obj_id in video_state.obj_colors:
+            del video_state.obj_colors[obj_id]
+        if obj_id in video_state.muted_objects:
+            video_state.muted_objects.remove(obj_id)
+    return {"message": f"Object {obj_id} and its masks have been deleted"}
+
+@app.post("/track_objects")
+async def track_objects(data: ExportData, background_tasks: BackgroundTasks):
+    video_id = data.video_id
+    with state_lock:
+        if video_id not in video_states:
+            logger.warning(f"Attempted to track objects in non-existent video {video_id}")
+            raise HTTPException(status_code=404, detail="Video not found")
+        video_state = video_states[video_id]
+        video_state.last_access = time.time()
+        video_state.tracking_complete = False
+        logger.info(f"Initiating tracking for video {video_id}")
+    background_tasks.add_task(run_tracking, video_id)
+    return {"message": "Tracking started"}
+
+@app.get("/tracking_status/{video_id}")
+async def tracking_status(video_id: str):
+    with state_lock:
+        if video_id not in video_states:
+            logger.warning(f"Requested tracking status for non-existent video {video_id}")
+            raise HTTPException(status_code=404, detail="Video not found")
+        video_state = video_states[video_id]
+        video_state.last_access = time.time()
+        if video_state.tracking_complete:
+            logger.info(f"Tracking complete for video {video_id}")
+            return {"status": "complete"}
+        else:
+            logger.info(f"Tracking in progress for video {video_id}")
+            return {"status": "in_progress"}
+        
+async def apply_concurrent_effects(frame, all_effects_data, video_state):
+    """
+    Apply multiple objects' effects simultaneously to a single frame
+    """
+    # Create a composite result frame starting with the original
+    result_frame = frame.copy()
+    
+    # Process each object's effects
+    for effect_data in all_effects_data:
+        obj_id = effect_data['id']
+        effects = effect_data['effects']
+        feather_params = effect_data['feather_params']
+        
+        # Get and prepare mask
+        mask = effect_data.get('mask', None)
+        if mask is None:
+            continue
+            
+        # Ensure mask has correct shape
+        if mask.ndim == 3:
+            mask = mask.squeeze()  # Remove extra dimensions if present
+            
+        # Process effects for this object
+        obj_frame = result_frame.copy()
+        
+        for effect in effects:
+            if effect.muted:
+                continue
+            
+            # Get effect function from video state
+            effect_script = video_state.fx_scripts.get(effect.name)
+            if not effect_script:
+                logger.error(f"Effect {effect.name} not found")
+                continue
+                
+            effect_func = effect_script['function']
+            
+            try:
+                # Prepare effect parameters - only include mask if effect accepts it
+                effect_params = effect.params.copy() if hasattr(effect, 'params') else {}
+                
+                # Check if effect function accepts mask parameter
+                import inspect
+                sig = inspect.signature(effect_func)
+                if 'mask' in sig.parameters:
+                    effect_params['mask'] = mask
+                elif 'sam2_mask' in sig.parameters:
+                    effect_params['sam2_mask'] = mask
+                
+                # Apply the effect
+                effect_frame = effect_func(obj_frame, **effect_params)
+                
+                # Apply feathering to mask for blending
+                feathered_mask = apply_feathering(mask, feather_params)
+                if feathered_mask.ndim == 2:
+                    feathered_mask = feathered_mask[:, :, np.newaxis]
+                
+                # Blend the effect result with the previous frame
+                opacity = effect.opacity if hasattr(effect, 'opacity') else 1.0
+                feathered_mask = feathered_mask * opacity
+                obj_frame = obj_frame * (1 - feathered_mask) + effect_frame * feathered_mask
+                
+            except Exception as e:
+                logger.error(f"Error applying effect {effect.name} for object {obj_id}: {e}")
+                logger.error(f"Effect params: {effect_params}")
+                continue
+        
+        # Blend this object's result with the main result
+        result_frame = obj_frame
+    
+    return result_frame
+
+# In main.py
+
+async def apply_effects_to_all_frames(frame, all_effects_data, video_state):
+    """
+    Apply multiple objects' effects simultaneously to a single frame with proper error handling
+    """
+    if frame is None:
+        logger.error("Received null frame")
+        return frame
+    
+    # Create a composite result frame starting with the original
+    result_frame = frame.copy()
+    
+    # Process each object's effects
+    for effect_data in all_effects_data:
+        if not effect_data:
+            continue
+            
+        obj_id = effect_data.get('id')
+        effects = effect_data.get('effects', [])
+        feather_params = effect_data.get('feather_params', {})
+        
+        # Skip if missing required data
+        if not all([obj_id, effects, feather_params]):
+            logger.warning(f"Skipping effect application for object {obj_id} due to missing data")
+            continue
+            
+        # Get and prepare mask
+        mask = effect_data.get('mask')
+        if mask is None:
+            logger.warning(f"No mask found for object {obj_id}")
+            continue
+            
+        # Ensure mask has correct shape
+        if mask.ndim == 3:
+            mask = mask.squeeze()  # Remove extra dimensions if present
+            
+        # Process effects for this object
+        try:
+            obj_frame = result_frame.copy()
+            
+            for effect in effects:
+                if not effect or getattr(effect, 'muted', True):
+                    continue
+                
+                # Get effect function from video state
+                effect_script = video_state.fx_scripts.get(getattr(effect, 'name', ''))
+                if not effect_script or 'function' not in effect_script:
+                    logger.warning(f"Effect {getattr(effect, 'name', 'unknown')} not found")
+                    continue
+                    
+                effect_func = effect_script['function']
+                
+                try:
+                    # Prepare effect parameters
+                    effect_params = getattr(effect, 'params', {}).copy()
+                    if not effect_params:
+                        effect_params = {}
+                    
+                    # Add mask parameter if function accepts it
+                    import inspect
+                    sig = inspect.signature(effect_func)
+                    if 'mask' in sig.parameters:
+                        effect_params['mask'] = mask
+                    elif 'sam2_mask' in sig.parameters:
+                        effect_params['sam2_mask'] = mask
+                    
+                    # Apply the effect
+                    effect_frame = effect_func(obj_frame, **effect_params)
+                    if effect_frame is None:
+                        logger.error(f"Effect {effect.name} returned None for object {obj_id}")
+                        continue
+                    
+                    # Apply feathering to mask
+                    feathered_mask = apply_feathering(mask, feather_params)
+                    if feathered_mask is None:
+                        logger.error(f"Feathering returned None for object {obj_id}")
+                        continue
+                        
+                    if feathered_mask.ndim == 2:
+                        feathered_mask = feathered_mask[:, :, np.newaxis]
+                    
+                    # Apply opacity
+                    opacity = getattr(effect, 'opacity', 1.0)
+                    feathered_mask = feathered_mask * opacity
+                    
+                    # Blend the effect result
+                    obj_frame = obj_frame * (1 - feathered_mask) + effect_frame * feathered_mask
+                    
+                except Exception as e:
+                    logger.error(f"Error applying effect {getattr(effect, 'name', 'unknown')} for object {obj_id}: {str(e)}")
+                    continue
+            
+            # Blend this object's result with main result
+            result_frame = obj_frame
+            
+        except Exception as e:
+            logger.error(f"Error processing effects for object {obj_id}: {str(e)}")
+            continue
+    
+    return result_frame
+
+@app.post("/apply_effects")
+async def apply_effects(request: ApplyEffectsRequest):
+    try:
+        video_id = request.video_id
+        frame_idx = request.frame_idx
+        reset_frame = getattr(request, 'reset_frame', False)
+        original_frame_hash = getattr(request, 'original_frame_hash', None)
+        
+        with state_lock:
+            if video_id not in video_states:
+                raise HTTPException(status_code=404, detail="Video not found")
+            video_state = video_states[video_id]
+            
+        frames_dir = os.path.join(video_state.video_dir, "frames")
+        frame_path = os.path.join(frames_dir, f"{frame_idx:05d}.jpg")
+        original_frame_path = os.path.join(frames_dir, f"original_{frame_idx:05d}.jpg")
+        
+        # Handle original frame storage
+        if reset_frame or original_frame_hash:
+            if not os.path.exists(original_frame_path):
+                shutil.copyfile(frame_path, original_frame_path)
+            frame = cv2.imread(original_frame_path)
+        else:
+            frame = cv2.imread(frame_path)
+            
+        if frame is None:
+            raise HTTPException(status_code=500, detail="Failed to load frame")
+
+        # Prepare effect data
+        all_effects_data = []
+        if request.objects:  # Multiple objects mode
+            for obj_data in request.objects:
+                if not obj_data.get('id'): continue
+                effects_data = {
+                    'id': obj_data['id'],
+                    'effects': obj_data.get('effects', []),
+                    'feather_params': obj_data.get('feather_params', {}),
+                    'mask': video_state.masks_by_frame.get(frame_idx, {}).get(obj_data['id'])
+                }
+                all_effects_data.append(effects_data)
+        elif request.obj_id:  # Single object mode
+            all_effects_data.append({
+                'id': request.obj_id,
+                'effects': request.effects or [],
+                'feather_params': request.feather_params or {},
+                'mask': video_state.masks_by_frame.get(frame_idx, {}).get(request.obj_id)
+            })
+
+        # Apply effects and save
+        result_frame = await apply_effects_to_frame(frame, all_effects_data, video_state)
+        if result_frame is not None:
+            cv2.imwrite(frame_path, result_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+            
+        return {"message": "Effects applied successfully"}
+        
+    except Exception as e:
+        logger.error(f"Error in apply_effects: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+def compile_final_video(video_state, temp_frames_dir: str, output_video_path: str):
+    """
+    Compile final video from processed frames with high quality settings
+    
+    Args:
+        video_state: VideoState object containing video properties
+        temp_frames_dir: Directory containing processed frames
+        output_video_path: Path where final video will be saved
+    """
+    try:
+        import ffmpeg
+        
+        # Setup input streams
+        input_frames = ffmpeg.input(
+            os.path.join(temp_frames_dir, '%05d.jpg'),
+            framerate=video_state.fps
+        )
+        
+        # Add audio from original video if it exists
+        try:
+            input_audio = ffmpeg.input(video_state.original_video_path).audio
+        except Exception as e:
+            logger.warning(f"Could not load audio from original video: {str(e)}")
+            input_audio = None
+
+        # Prepare output settings
+        output_settings = {
+            'pix_fmt': 'yuv420p',
+            'vcodec': 'libx264',
+            'crf': 18,            # High quality (lower = better, 18 is visually lossless)
+            'preset': 'slow',     # Better compression
+            's': f"{video_state.width}x{video_state.height}",
+            'b:v': '5000k',       # High video bitrate
+            'shortest': None      # Ensure video/audio sync
+        }
+        
+        # Add audio settings if we have audio
+        if input_audio is not None:
+            output_settings['acodec'] = 'copy'  # Copy audio without re-encoding
+
+        # Create output stream
+        output_stream = ffmpeg.output(
+            input_frames,
+            *([] if input_audio is None else [input_audio]),
+            output_video_path,
+            **output_settings
+        )
+
+        # Run the compilation
+        output_stream.overwrite_output().run(
+            capture_stdout=True,
+            capture_stderr=True
+        )
+        
+        logger.info(
+            f"Video compiled successfully at {output_video_path} "
+            f"with FPS={video_state.fps}, "
+            f"Resolution={video_state.width}x{video_state.height}"
+        )
+        
+    except ffmpeg.Error as e:
+        stderr = e.stderr.decode() if e.stderr else 'No stderr available'
+        logger.error(f"ffmpeg error during compilation: {stderr}")
+        raise RuntimeError(f"Video compilation failed: {stderr}")
+        
+    except Exception as e:
+        logger.error(f"Unexpected error during video compilation: {str(e)}")
+        raise
+
+def compile_video_with_effects(video_state, output_video_path: str):
+    """Compile video with all effects from all objects applied concurrently"""
+    frames_dir = os.path.join(video_state.video_dir, "frames")
+    temp_frames_dir = os.path.join(video_state.video_dir, "temp_frames")
+    os.makedirs(temp_frames_dir, exist_ok=True)
+
+    try:
+        # Get all frame files
+        frame_files = sorted([f for f in os.listdir(frames_dir) 
+                            if f.endswith('.jpg') and f.split('.')[0].isdigit()])
+        
+        # Collect ALL objects and their effects upfront
+        logger.info("Collecting all objects and effects...")
+        objects_with_effects = {}
+        
+        # Get all unique object IDs from masks across all frames
+        all_object_ids = set()
+        for frame_masks in video_state.masks_by_frame.values():
+            all_object_ids.update(frame_masks.keys())
+        
+        logger.info(f"Found {len(all_object_ids)} objects with masks")
+        
+        # Collect effects and parameters for each object
+        for obj_id in all_object_ids:
+            effects = video_state.effects_by_obj.get(obj_id, [])
+            if not effects:
+                continue
+                
+            # Get object's feather params
+            feather_params = {"radius": 0, "expand": 0, "opacity": 1.0}
+            for obj in getattr(video_state, 'objects', []):
+                if getattr(obj, 'id', None) == obj_id:
+                    feather_params = getattr(obj, 'featherParams', feather_params)
+                    break
+            
+            objects_with_effects[obj_id] = {
+                'effects': effects,
+                'feather_params': feather_params
+            }
+        
+        logger.info(f"Found {len(objects_with_effects)} objects with effects to process")
+
+        # Process each frame
+        total_frames = len(frame_files)
+        for frame_idx, frame_file in enumerate(frame_files):
+            logger.info(f"Processing frame {frame_idx + 1}/{total_frames}")
+            
+            # Load original frame
+            frame_path = os.path.join(frames_dir, frame_file)
+            frame = cv2.imread(frame_path)
+            
+            if frame is None:
+                logger.error(f"Could not load frame {frame_idx}")
+                continue
+
+            # Prepare effects data for this frame
+            current_frame_effects = []
+            frame_masks = video_state.masks_by_frame.get(frame_idx, {})
+            
+            for obj_id, obj_data in objects_with_effects.items():
+                mask = frame_masks.get(obj_id)
+                if mask is not None:
+                    effect_data = {
+                        'id': obj_id,
+                        'effects': obj_data['effects'],
+                        'feather_params': obj_data['feather_params'],
+                        'mask': mask
+                    }
+                    current_frame_effects.append(effect_data)
+            
+            logger.debug(f"Frame {frame_idx + 1}: Processing {len(current_frame_effects)} objects with effects")
+
+            try:
+                # Apply all effects for this frame
+                result_frame = apply_effects_to_frame(frame, current_frame_effects, video_state)
+                
+                # Save processed frame
+                temp_frame_path = os.path.join(temp_frames_dir, frame_file)
+                cv2.imwrite(temp_frame_path, result_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+                
+            except Exception as e:
+                logger.error(f"Error processing frame {frame_idx}: {str(e)}")
+                shutil.copy2(frame_path, os.path.join(temp_frames_dir, frame_file))
+
+        logger.info("Frame processing complete. Starting video compilation...")
+        compile_final_video(video_state, temp_frames_dir, output_video_path)
+            
+    except Exception as e:
+        logger.error(f"Error during video compilation: {str(e)}")
+        raise
+        
+    finally:
+        if os.path.exists(temp_frames_dir):
+            shutil.rmtree(temp_frames_dir)
+
+
+@app.post("/export")
+async def export_video(data: ExportData):
+    video_id = data.video_id
+    export_options = data.export_options or {}
+    
+    with state_lock:
+        if video_id not in video_states:
+            raise HTTPException(status_code=404, detail="Video not found")
+        
+        video_state = video_states[video_id]
+        video_state.last_access = time.time()
+        logger.info(f"Starting export for video {video_id} with options {export_options}")
+    
+    try:
+        # Create exports directory
+        output_video_dir = os.path.join(video_state.video_dir, "Exports")
+        os.makedirs(output_video_dir, exist_ok=True)
+        
+        # Set output path
+        output_video_path = os.path.join(output_video_dir, "final_video.mp4")
+        
+        # Export video with effects
+        if export_options.get('video_with_effects', True):
+            logger.info("Processing video with effects...")
+            compile_video_with_effects(video_state, output_video_path)
+            
+        # Export masks if requested
+        if export_options.get('masks', False):
+            logger.info("Exporting masks...")
+            export_masks_to_directory(video_state)
+            
+        return {
+            "message": "Export completed successfully",
+            "download_url": f"/videos/{video_id}/Exports/final_video.mp4"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error during export: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e)) 
+
+@app.post("/save_color_preset")
+async def save_color_preset(preset_data: dict):
+    preset_name = preset_data.get('preset_name')
+    color_settings = preset_data.get('color_settings')
+
+    if not preset_name or not color_settings:
+        raise HTTPException(status_code=400, detail="Preset name and color settings are required.")
+
+    preset_data_full = {
+        'preset_name': preset_name,
+        'color_settings': color_settings
+    }
+
+    preset_path = COLOR_PRESETS_DIR / f"{preset_name}.json"
+    with open(preset_path, 'w') as f:
+        json.dump(preset_data_full, f)
+
+    # Save as last used preset
+    last_used_preset_path = COLOR_PRESETS_DIR / "last_used_preset.json"
+    with open(last_used_preset_path, 'w') as f:
+        json.dump(preset_data_full, f)
+
+    return {"message": "Color preset saved successfully."}
+
+@app.get("/get_color_presets")
+async def get_color_presets():
+    presets = []
+    for preset_file in COLOR_PRESETS_DIR.glob("*.json"):
+        if preset_file.name == "last_used_preset.json":
+            continue  # Skip the last used preset
+        with open(preset_file, 'r') as f:
+            preset_data = json.load(f)
+            presets.append(preset_data)
+    return presets  # Return a list of presets
+
+@app.get("/get_last_used_color_preset")
+async def get_last_used_color_preset():
+    last_used_preset_path = COLOR_PRESETS_DIR / "last_used_preset.json"
+
+    if not last_used_preset_path.exists():
+        return None  # No last used preset
+
+    with open(last_used_preset_path, 'r') as f:
+        preset_data = json.load(f)
+
+    return preset_data  # Return the preset data
+
+@app.get("/load_color_presets")
+async def load_color_presets():
+    presets = []
+    for preset_file in COLOR_PRESETS_DIR.glob("*.json"):
+        with open(preset_file, 'r') as f:
+            color_settings = json.load(f)
+            presets.append({
+                'preset_name': preset_file.stem,
+                'color_settings': color_settings
+            })
+    return {"presets": presets}
+
+@app.post("/save_effect_stack_preset")
+async def save_effect_stack_preset(preset_data: dict):
+    preset_name = preset_data.get('preset_name')
+    effects_stack = preset_data.get('effects_stack')
+    sub_folder = preset_data.get('sub_folder', '')
+
+    if not preset_name or not effects_stack:
+        raise HTTPException(status_code=400, detail="Preset name and effects stack are required.")
+
+    preset_dir = EFFECT_STACK_PRESETS_DIR / sub_folder
+    preset_dir.mkdir(parents=True, exist_ok=True)
+    preset_path = preset_dir / f"{preset_name}.json"
+
+    with open(preset_path, 'w') as f:
+        json.dump(effects_stack, f)
+
+    return {"message": "Effect stack preset saved successfully."}
+
+@app.get("/load_effect_stack_presets")
+async def load_effect_stack_presets():
+    presets = []
+    for root, dirs, files in os.walk(EFFECT_STACK_PRESETS_DIR):
+        for file in files:
+            if file.endswith('.json'):
+                preset_path = Path(root) / file
+                with open(preset_path, 'r') as f:
+                    effects_stack = json.load(f)
+                    presets.append({
+                        'preset_name': file[:-5],
+                        'effects_stack': effects_stack,
+                        'sub_folder': str(Path(root).relative_to(EFFECT_STACK_PRESETS_DIR))
+                    })
+    return {"presets": presets}
+
+@app.post("/reset_state")
+async def reset_state(data: ResetStateData):
+    video_id = data.video_id
+    with state_lock:
+        if video_id not in video_states:
+            logger.warning(f"Attempted to reset state for non-existent video {video_id}")
+            raise HTTPException(status_code=404, detail="Video not found")
+        video_state = video_states[video_id]
+        video_state.last_access = time.time()
+
+        try:
+            for predictor_state in video_state.predictor_states_by_obj.values():
+                predictor.reset_state(predictor_state)
+            logger.info(f"Reset predictor states for video {video_id}")
+        except Exception as e:
+            logger.error(f"Failed to reset predictor states for video {video_id}: {e}")
+            raise HTTPException(status_code=500, detail="Failed to reset predictor states.")
+
+        # Reset other state
+        video_state.masks_by_frame = {}
+        video_state.adjusted_masks_by_frame = {}
+        video_state.prompts_by_obj = {}
+        video_state.tracking_complete = False
+        video_state.obj_colors = {}
+        video_state.effects_by_obj = {}
+        video_state.muted_objects = set()
+        video_state.predictor_states_by_obj = {}  # Clear predictor states per object
+        logger.info(f"Reset application state for video {video_id}")
+
+    return {"message": "State reset"}
+
+@app.post("/mute_object")
+async def mute_object(data: MuteObjectData):
+    video_id = data.video_id
+    obj_id = data.obj_id
+    muted = data.muted
+    with state_lock:
+        if video_id not in video_states:
+            logger.warning(f"Attempted to mute object in non-existent video {video_id}")
+            raise HTTPException(status_code=404, detail="Video not found")
+        video_state = video_states[video_id]
+        video_state.last_access = time.time()
+        
+        if muted:
+            video_state.muted_objects.add(obj_id)
+            logger.info(f"Muted object {obj_id} in video {video_id}")
+        else:
+            video_state.muted_objects.discard(obj_id)
+            logger.info(f"Unmuted object {obj_id} in video {video_id}")
+    
+    return {"message": f"Object {obj_id} {'muted' if muted else 'unmuted'} successfully"}
+
+@app.get("/get_effects/{video_id}")
+async def get_effects(video_id: str):
+    with state_lock:
+        if video_id not in video_states:
+            logger.warning(f"Requested effects for non-existent video {video_id}")
+            raise HTTPException(status_code=404, detail="Video not found")
+        video_state = video_states[video_id]
+        video_state.last_access = time.time()
+    effects = []
+    for effect_name, effect_data in video_state.fx_scripts.items():
+        config = effect_data.get('config', {})
+        effects.append({
+            'name': effect_name,
+            'defaultParams': config.get('defaultParams', {})
+        })
+    return {"effects": effects}
+
+@app.post("/upload_effect")
+async def upload_effect(data: EffectUploadData):
+    effect_name = data.effect_name.strip()
+    effect_code = data.effect_code
+    effect_config = data.effect_config
+
+    if not effect_name or not effect_code:
+        logger.warning("Effect name and code are required.")
+        raise HTTPException(status_code=400, detail="Effect name and code are required.")
+
+    # Sanitize the effect name to prevent directory traversal
+    effect_name_safe = "".join(c for c in effect_name if c.isalnum() or c in (' ', '_')).rstrip()
+
+    # Define the path to save the effect
+    fx_dir = Path(BASE_DIR) / "FX" / effect_name_safe
+    fx_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save the effect code to script.py
+    script_path = fx_dir / "script.py"
+    with open(script_path, 'w', encoding='utf-8') as f:
+        f.write(effect_code)
+
+    # Save the effect config to config.json if provided
+    if effect_config:
+        config_path = fx_dir / "config.json"
+        try:
+            # Validate that effect_config is valid JSON
+            config_data = json.loads(effect_config)
+            with open(config_path, 'w', encoding='utf-8') as f:
+                json.dump(config_data, f, indent=4)
+        except json.JSONDecodeError as e:
+            logger.error(f"Invalid JSON in effect config: {e}")
+            raise HTTPException(status_code=400, detail="Invalid JSON in effect config.")
+
+    # Reload the effects in all video states (without requiring server restart)
+    with state_lock:
+        for video_state in video_states.values():
+            video_state.load_fx_scripts()
+
+    logger.info(f"Effect '{effect_name}' uploaded and loaded successfully.")
+    return {"message": f"Effect '{effect_name}' uploaded successfully."}
+
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy"}
+
+# Run the application
+if __name__ == "__main__":
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True, reload_exclude=["FX/*"])

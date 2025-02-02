@@ -1,0 +1,88 @@
+{
+    "name": "0PS7Masked",
+    "description": "Pixel sorting effect applied only within the segmentation mask, with options for sorting thresholds, direction, and visual adjustments.",
+    "defaultParams": {
+        "threshold_min": {
+            "type": "int",
+            "value": 0,
+            "min": 0,
+            "max": 255,
+            "step": 1
+        },
+        "threshold_max": {
+            "type": "int",
+            "value": 255,
+            "min": 0,
+            "max": 255,
+            "step": 1
+        },
+        "angle": {
+            "type": "float",
+            "value": 0,
+            "min": 0,
+            "max": 360,
+            "step": 1
+        },
+        "contrast": {
+            "type": "float",
+            "value": 1.0,
+            "min": 0.5,
+            "max": 2.0,
+            "step": 0.1
+        },
+        "saturation": {
+            "type": "float",
+            "value": 1.0,
+            "min": 0.5,
+            "max": 2.0,
+            "step": 0.1
+        },
+        "resolution": {
+            "type": "int",
+            "value": 1,
+            "min": 1,
+            "max": 10,
+            "step": 1
+        },
+        "noise_amount": {
+            "type": "int",
+            "value": 0,
+            "min": 0,
+            "max": 100,
+            "step": 1
+        },
+        "noise_scale": {
+            "type": "float",
+            "value": 1.0,
+            "min": 0.1,
+            "max": 10.0,
+            "step": 0.1
+        },
+        "sorting_direction": {
+            "type": "int",
+            "value": 0,
+            "min": 0,
+            "max": 1,
+            "step": 1
+        },
+        "sorting_style": {
+            "type": "int",
+            "value": 0,
+            "min": 0,
+            "max": 2,
+            "step": 1
+        }
+    },
+    "paramDescriptions": {
+        "threshold_min": "Minimum pixel brightness for sorting. Pixels below this brightness are ignored in the sorting process.",
+        "threshold_max": "Maximum pixel brightness for sorting. Pixels above this brightness are ignored in the sorting process.",
+        "angle": "Angle to apply to the frame before pixel sorting.",
+        "contrast": "Adjusts the contrast of the image.",
+        "saturation": "Adjusts the saturation of the image.",
+        "resolution": "Resolution level for processing (lower values increase speed but reduce quality).",
+        "noise_amount": "Percentage of noise added to the effect.",
+        "noise_scale": "Scale of the noise pattern applied to the image.",
+        "sorting_direction": "0 for vertical sorting, 1 for horizontal sorting.",
+        "sorting_style": "0 for sorting by Hue, 1 for sorting by Saturation, 2 for sorting by Lightness."
+    }
+}

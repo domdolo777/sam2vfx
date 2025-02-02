@@ -1,0 +1,80 @@
+/* src/App.css */
+
+:root {
+  /* Containers */
+  --sidebarBg: #12190f;
+  --mainBg: #3c343b;
+  --mainText: #e6e6e6;
+
+  /* Buttons */
+  --primaryButtonBg: #aa797d;
+  --primaryButtonText: #ffffff;
+  --primaryButtonHoverBg: #8a6363;
+  --disabledButtonBg: #cccccc;
+  --disabledButtonText: #666666;
+
+  /* Prompt Buttons */
+  --buttonBgSelected: #007bff;
+  --buttonTextSelected: #ffffff;
+  --buttonBgUnselected: #e5e7eb;
+  --buttonTextUnselected: #1f2937;
+  --buttonBgHover: #d1d5db;
+
+  /* Effect Blocks */
+  --effectBlockBg: #ffffff;
+  --effectBlockText: #000000;
+
+  /* Add more variables as needed */
+}
+
+.App {
+  text-align: center;
+}
+
+.App-logo {
+  height: 40vmin;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .App-logo {
+    animation: App-logo-spin infinite 20s linear;
+  }
+}
+
+.App-header {
+  background-color: var(--mainBg);
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  font-size: calc(10px + 2vmin);
+  color: var(--mainText);
+}
+
+.App-link {
+  color: #61dafb;
+}
+
+@keyframes App-logo-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Additional Styles */
+button {
+  cursor: pointer;
+}
+
+/* Apply global styles to effect blocks */
+.effect-block {
+  background-color: var(--effectBlockBg);
+  color: var(--effectBlockText);
+  border: 1px solid #ccc;
+  border-radius: 8px;
+}

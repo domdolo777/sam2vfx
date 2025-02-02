@@ -1,0 +1,80 @@
+{
+    "name": "02psoGfinal",
+    "description": "Pixel sorting effect applied only within the segmentation mask, with options for thresholds, sorting direction, and noise.",
+    "defaultParams": {
+        "threshold_min": {
+            "type": "int",
+            "value": 0,
+            "min": 0,
+            "max": 255,
+            "step": 1
+        },
+        "threshold_max": {
+            "type": "int",
+            "value": 255,
+            "min": 0,
+            "max": 255,
+            "step": 1
+        },
+        "angle": {
+            "type": "float",
+            "value": 0,
+            "min": 0,
+            "max": 360,
+            "step": 1
+        },
+        "resolution": {
+            "type": "int",
+            "value": 1,
+            "min": 1,
+            "max": 10,
+            "step": 1
+        },
+        "noise_amount": {
+            "type": "int",
+            "value": 0,
+            "min": 0,
+            "max": 100,
+            "step": 1
+        },
+        "noise_scale": {
+            "type": "float",
+            "value": 1.0,
+            "min": 0.1,
+            "max": 10.0,
+            "step": 0.1
+        },
+        "sorting_direction": {
+            "type": "int",
+            "value": 0,
+            "min": 0,
+            "max": 1,
+            "step": 1
+        },
+        "sorting_style": {
+            "type": "int",
+            "value": 0,
+            "min": 0,
+            "max": 2,
+            "step": 1
+        },
+        "opacity": {
+            "type": "float",
+            "value": 1.0,
+            "min": 0.0,
+            "max": 1.0,
+            "step": 0.1
+        }
+    },
+    "paramDescriptions": {
+        "threshold_min": "Minimum pixel brightness for sorting. Pixels below this value are ignored, only within the mask.",
+        "threshold_max": "Maximum pixel brightness for sorting. Pixels above this value are ignored, only within the mask.",
+        "angle": "Angle to rotate the frame before applying the sorting effect.",
+        "resolution": "Controls the resolution at which sorting is performed.",
+        "noise_amount": "Percentage of noise to add to the image. Higher values add more noise.",
+        "noise_scale": "Controls the scale of the noise added to the image.",
+        "sorting_direction": "Defines the direction for sorting. 0 = Vertical, 1 = Horizontal.",
+        "sorting_style": "Defines the style of sorting. 0 = Sort by Hue, 1 = Sort by Saturation, 2 = Sort by Lightness.",
+        "opacity": "Blending factor to control how much of the original image is mixed with the effect."
+    }
+}

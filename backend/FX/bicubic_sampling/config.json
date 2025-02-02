@@ -1,0 +1,25 @@
+
+{
+  "name": "bicubic_sampling",
+  "description": "Applies a color halftone effect triggered by light values, using bicubic sampling",
+  "defaultParams": {
+    "dot_size": {
+      "value": 10,
+      "min": 5,
+      "max": 50,
+      "step": 1,
+      "type": "int"
+    },
+    "light_threshold": {
+      "value": 0.5,
+      "min": 0.0,
+      "max": 1.0,
+      "step": 0.01,
+      "type": "float"
+    }
+  },
+  "paramDescriptions": {
+    "dot_size": "Controls the size of the halftone dots (in pixels)",
+    "light_threshold": "Luminance threshold to trigger the halftone effect (0.0 to 1.0)"
+  }
+}

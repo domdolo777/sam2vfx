@@ -1,0 +1,107 @@
+{
+    "name": "01miniPixelSort",
+    "description": "Applies a pixel sorting effect within a specified mask, with customizable thresholds, sorting direction, and visual adjustments like contrast, saturation, and noise.",
+    "defaultParams": {
+        "threshold_min": {
+            "type": "int",
+            "value": 0,
+            "min": 0,
+            "max": 255,
+            "step": 1,
+            "description": "Minimum pixel intensity for sorting. Pixels below this value are ignored, but this only applies inside the mask."
+        },
+        "threshold_max": {
+            "type": "int",
+            "value": 255,
+            "min": 0,
+            "max": 255,
+            "step": 1,
+            "description": "Maximum pixel intensity for sorting. Pixels above this value are ignored, but this only applies inside the mask."
+        },
+        "sorting_style": {
+            "type": "int",
+            "value": 0,
+            "min": 0,
+            "max": 2,
+            "step": 1,
+            "description": "Defines the style of sorting: 0 = Sort by Hue, 1 = Sort by Saturation, 2 = Sort by Lightness."
+        },
+        "angle": {
+            "type": "float",
+            "value": 0.0,
+            "min": 0.0,
+            "max": 360.0,
+            "step": 1.0,
+            "description": "Angle to rotate the frame before applying the sorting effect."
+        },
+        "contrast": {
+            "type": "float",
+            "value": 1.0,
+            "min": 0.5,
+            "max": 2.0,
+            "step": 0.1,
+            "description": "Adjusts the contrast of the image. A higher value increases contrast."
+        },
+        "saturation": {
+            "type": "float",
+            "value": 1.0,
+            "min": 0.5,
+            "max": 2.0,
+            "step": 0.1,
+            "description": "Adjusts the saturation of the image. A higher value increases saturation."
+        },
+        "resolution": {
+            "type": "int",
+            "value": 1,
+            "min": 1,
+            "max": 10,
+            "step": 1,
+            "description": "Controls the resolution at which sorting is performed. Lower values process faster but reduce quality."
+        },
+        "noise_amount": {
+            "type": "int",
+            "value": 0,
+            "min": 0,
+            "max": 100,
+            "step": 1,
+            "description": "Percentage of noise to add to the image. Higher values add more noise."
+        },
+        "noise_scale": {
+            "type": "float",
+            "value": 1.0,
+            "min": 0.1,
+            "max": 10.0,
+            "step": 0.1,
+            "description": "Controls the scale of the noise added to the image."
+        },
+        "sorting_direction": {
+            "type": "int",
+            "value": 0,
+            "min": 0,
+            "max": 1,
+            "step": 1,
+            "description": "Defines the direction for sorting: 0 = Vertical, 1 = Horizontal."
+        },
+        "opacity": {
+            "type": "float",
+            "value": 1.0,
+            "min": 0.0,
+            "max": 1.0,
+            "step": 0.1,
+            "description": "Blending factor to control how much of the original image is mixed with the effect. 1.0 = full effect, 0.0 = no effect."
+        }
+    },
+    "paramDescriptions": {
+        "threshold_min": "Minimum pixel intensity for sorting. Pixels below this value are ignored, but this only applies inside the mask.",
+        "threshold_max": "Maximum pixel intensity for sorting. Pixels above this value are ignored, but this only applies inside the mask.",
+        "sorting_style": "Defines the style of sorting: 0 = Sort by Hue, 1 = Sort by Saturation, 2 = Sort by Lightness.",
+        "angle": "Angle to rotate the frame before applying the sorting effect.",
+        "contrast": "Adjusts the contrast of the image. A higher value increases contrast.",
+        "saturation": "Adjusts the saturation of the image. A higher value increases saturation.",
+        "resolution": "Controls the resolution at which sorting is performed. Lower values process faster but reduce quality.",
+        "noise_amount": "Percentage of noise to add to the image. Higher values add more noise.",
+        "noise_scale": "Controls the scale of the noise added to the image.",
+        "sorting_direction": "Defines the direction for sorting: 0 = Vertical, 1 = Horizontal.",
+        "opacity": "Blending factor to control how much of the original image is mixed with the effect. 1.0 = full effect, 0.0 = no effect."
+    }
+}

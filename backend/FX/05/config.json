@@ -1,0 +1,44 @@
+{
+    "name": "Advanced_Pixel_Sorter",
+    "description": "An advanced pixel sorting effect designed to achieve a waterfall-like effect by manipulating pixels based on lightness, hue, and other parameters.",
+    "defaultParams": {
+        "threshold_min": {
+            "type": "int",
+            "value": 50,
+            "min": 0,
+            "max": 255,
+            "step": 1,
+            "widgetType": "slider"
+        },
+        "threshold_max": {
+            "type": "int",
+            "value": 200,
+            "min": 0,
+            "max": 255,
+            "step": 1,
+            "widgetType": "slider"
+        },
+        "sorting_direction": {
+            "type": "int",
+            "value": 0,
+            "min": 0,
+            "max": 1,
+            "step": 1,
+            "widgetType": "dropdown"
+        },
+        "sorting_style": {
+            "type": "int",
+            "value": 2,
+            "min": 0,
+            "max": 2,
+            "step": 1,
+            "widgetType": "dropdown"
+        }
+    },
+    "paramDescriptions": {
+        "threshold_min": "Controls the minimum pixel brightness for sorting.",
+        "threshold_max": "Controls the maximum pixel brightness for sorting.",
+        "sorting_direction": "Sets the sorting direction: 0 for vertical, 1 for horizontal.",
+        "sorting_style": "Sort based on: 0 = Hue, 1 = Saturation, 2 = Lightness."
+    }
+}

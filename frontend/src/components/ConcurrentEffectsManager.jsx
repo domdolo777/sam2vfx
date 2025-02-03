@@ -1,4 +1,3 @@
-// ConcurrentEffectsManager.jsx
 import { useEffect, useCallback, useRef, useState } from 'react';
 import axios from 'axios';
 
@@ -24,13 +23,15 @@ const ConcurrentEffectsManager = ({
   const processingFramesRef = useRef(new Set());
   const originalFramesRef = useRef({});
 
+  // This function updates the effect state by sending a POST request to /apply_effects.
+  // The key update is converting the original_frame_hash to a string.
   const handleParameterUpdate = useCallback(async (effectData) => {
     if (isProcessing) return;
 
     try {
       setIsProcessing(true);
 
-      // Cancel any pending request
+      // Cancel any pending request if it exists.
       if (pendingRequestRef.current?.cancel) {
         pendingRequestRef.current.cancel();
       }
@@ -42,15 +43,20 @@ const ConcurrentEffectsManager = ({
       const source = CancelToken.source();
       pendingRequestRef.current = source;
 
-      // Create a frame key for tracking
+      // Create a unique key for the current frame.
       const frameKey = `${currentFrameIndex}`;
       if (processingFramesRef.current.has(frameKey)) return;
       processingFramesRef.current.add(frameKey);
 
-      // Store original frame reference if it doesn't exist
+      // Store a reference value for the frame if it doesn’t already exist.
+      // (We use Date.now() as a simple hash; since Date.now() returns a number,
+      // we will later convert it to a string.)
       if (!originalFramesRef.current[frameKey]) {
         originalFramesRef.current[frameKey] = Date.now();
       }
+
+      // IMPORTANT: Convert the original frame hash to a string.
+      const originalFrameHashStr = originalFramesRef.current[frameKey].toString();
 
       const updateData = {
         video_id: videoId,
@@ -60,9 +66,11 @@ const ConcurrentEffectsManager = ({
         feather_params: effectData.feather_params || {},
         preview_mode: effectPreviewMode,
         reset_frame: true,
-        original_frame_hash: originalFramesRef.current[frameKey]
+        // Send the hash as a string to satisfy the backend schema
+        original_frame_hash: originalFrameHashStr
       };
 
+      // Create a hash of the updateData (excluding the original_frame_hash conversion issue)
       const stateHash = JSON.stringify({
         effects: updateData.effects,
         feather_params: updateData.feather_params,
@@ -70,12 +78,13 @@ const ConcurrentEffectsManager = ({
         preview_mode: updateData.preview_mode
       });
 
+      // If this state is the same as the last applied one, skip the update.
       if (lastAppliedStateRef.current === stateHash) {
         processingFramesRef.current.delete(frameKey);
         return;
       }
 
-      // Use a relative URL; the proxy will forward this to the backend
+      // Send the request using a relative URL (which will be forwarded via your proxy).
       const response = await api.post('/apply_effects', updateData, {
         cancelToken: source.token
       });
@@ -98,7 +107,7 @@ const ConcurrentEffectsManager = ({
     }
   }, [videoId, currentFrameIndex, selectedObjectId, effectPreviewMode, onEffectUpdate, isProcessing]);
 
-  // When the frame index or effect mode changes, trigger an update
+  // Trigger a parameter update when frame index or effect mode changes.
   useEffect(() => {
     lastAppliedStateRef.current = null;
     if (effectsMode) {
@@ -113,7 +122,7 @@ const ConcurrentEffectsManager = ({
     }
   }, [currentFrameIndex, effectsMode, objects, selectedObjectId, handleParameterUpdate]);
 
-  // Handle initial frame
+  // Handle the initial frame update.
   useEffect(() => {
     if (!selectedObjectId) return;
     const selectedObject = objects.find(obj => obj.id === selectedObjectId);
@@ -130,7 +139,7 @@ const ConcurrentEffectsManager = ({
     }
   }, [objects, selectedObjectId, currentFrameIndex, handleParameterUpdate]);
 
-  // Cleanup any pending timeouts or cancellations on unmount
+  // Cleanup on unmount.
   useEffect(() => {
     let processingFramesCurrent = processingFramesRef.current;
     let parameterTimeoutCurrent = parameterUpdateTimeoutRef.current;

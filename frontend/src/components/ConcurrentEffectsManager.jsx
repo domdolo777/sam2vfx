@@ -1,8 +1,10 @@
+// ConcurrentEffectsManager.jsx
 import { useEffect, useCallback, useRef, useState } from 'react';
 import axios from 'axios';
 
+// Create an axios instance without a hard-coded baseURL so that relative URLs work
 const api = axios.create({
-  baseURL: 'http://localhost:8000'
+  // baseURL is omitted so that the proxy in package.json routes requests properly.
 });
 
 const ConcurrentEffectsManager = ({
@@ -24,14 +26,14 @@ const ConcurrentEffectsManager = ({
 
   const handleParameterUpdate = useCallback(async (effectData) => {
     if (isProcessing) return;
-    
+
     try {
       setIsProcessing(true);
 
+      // Cancel any pending request
       if (pendingRequestRef.current?.cancel) {
         pendingRequestRef.current.cancel();
       }
-
       if (parameterUpdateTimeoutRef.current) {
         clearTimeout(parameterUpdateTimeoutRef.current);
       }
@@ -40,12 +42,12 @@ const ConcurrentEffectsManager = ({
       const source = CancelToken.source();
       pendingRequestRef.current = source;
 
-      // Create frame key for tracking
+      // Create a frame key for tracking
       const frameKey = `${currentFrameIndex}`;
       if (processingFramesRef.current.has(frameKey)) return;
       processingFramesRef.current.add(frameKey);
 
-      // Store original frame reference if not exists
+      // Store original frame reference if it doesn't exist
       if (!originalFramesRef.current[frameKey]) {
         originalFramesRef.current[frameKey] = Date.now();
       }
@@ -73,6 +75,7 @@ const ConcurrentEffectsManager = ({
         return;
       }
 
+      // Use a relative URL; the proxy will forward this to the backend
       const response = await api.post('/apply_effects', updateData, {
         cancelToken: source.token
       });
@@ -83,7 +86,6 @@ const ConcurrentEffectsManager = ({
           onEffectUpdate();
         }
       }
-
     } catch (error) {
       if (!axios.isCancel(error)) {
         console.error('Error applying effects:', error?.response?.data || error);
@@ -96,10 +98,9 @@ const ConcurrentEffectsManager = ({
     }
   }, [videoId, currentFrameIndex, selectedObjectId, effectPreviewMode, onEffectUpdate, isProcessing]);
 
-  // Handle frame changes
+  // When the frame index or effect mode changes, trigger an update
   useEffect(() => {
     lastAppliedStateRef.current = null;
-    
     if (effectsMode) {
       const selectedObject = objects.find(obj => obj.id === selectedObjectId);
       if (selectedObject) {
@@ -115,10 +116,8 @@ const ConcurrentEffectsManager = ({
   // Handle initial frame
   useEffect(() => {
     if (!selectedObjectId) return;
-
     const selectedObject = objects.find(obj => obj.id === selectedObjectId);
     if (!selectedObject) return;
-
     if (currentFrameIndex === 0 && initialRenderRef.current) {
       initialRenderRef.current = false;
       const initTimeout = setTimeout(() => {
@@ -127,28 +126,24 @@ const ConcurrentEffectsManager = ({
           feather_params: selectedObject.featherParams
         });
       }, 100);
-
       return () => clearTimeout(initTimeout);
     }
   }, [objects, selectedObjectId, currentFrameIndex, handleParameterUpdate]);
 
-  // Cleanup with proper ref capturing
+  // Cleanup any pending timeouts or cancellations on unmount
   useEffect(() => {
     let processingFramesCurrent = processingFramesRef.current;
     let parameterTimeoutCurrent = parameterUpdateTimeoutRef.current;
     let pendingRequestCurrent = pendingRequestRef.current;
-
     return () => {
       if (processingFramesCurrent) {
         [...processingFramesCurrent].forEach(key => {
           processingFramesCurrent.delete(key);
         });
       }
-
       if (parameterTimeoutCurrent) {
         clearTimeout(parameterTimeoutCurrent);
       }
-
       if (pendingRequestCurrent?.cancel) {
         pendingRequestCurrent.cancel();
       }

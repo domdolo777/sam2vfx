@@ -1,0 +1,11 @@
+Flask
+flask-cors
+opencv-python
+numpy
+torch>=2.5.1
+Pillow
+tqdm
+hydra-core
+fastapi
+uvicorn
+python-multipart

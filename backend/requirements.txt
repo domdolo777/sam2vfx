@@ -9,3 +9,4 @@ hydra-core
 fastapi
 uvicorn
 python-multipart
+pydantic>=2.6.4

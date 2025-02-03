@@ -1,3 +1,4 @@
+// UploadVideo.jsx
 import React, { useState } from 'react';
 import axios from 'axios';
 
@@ -14,11 +15,13 @@ function UploadVideo({ setVideoId }) {
     setUploading(true);
 
     try {
-      const response = await axios.post('http://localhost:8000/upload', formData, {
+      // Use a relative URL so that the request goes through your proxy setting in package.json.
+      const response = await axios.post('/upload', formData, {
         headers: {
           'Content-Type': 'multipart/form-data',
         },
       });
+      // Set video ID from response data
       setVideoId(response.data.video_id);
     } catch (error) {
       console.error('Error uploading video:', error);

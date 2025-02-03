@@ -1,3 +1,4 @@
+# === Imports ===
 import os
 import sys
 import uuid
@@ -20,12 +21,10 @@ from PIL import Image
 import colorsys
 import importlib.util
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
 import json
-
 from fastapi.responses import FileResponse
 
-# Initialize logging
+# === Logging Setup ===
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -36,8 +35,136 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Add the SAM2 directory to sys.path to import sam2
-SAM2_PATH = os.getenv('SAM2_PATH', '/mnt/c/Users/cryst/segment-anything-2')  # Update this path as needed
+# === Pydantic Models ===
+
+class VideoState:
+    def __init__(self, video_id, video_dir, video_filename, fps, width, height):
+        self.video_id = video_id
+        self.video_dir = video_dir
+        self.video_filename = video_filename
+        self.fps = fps
+        self.width = width
+        self.height = height
+        self.last_access = time.time()
+        self.masks_by_frame = {}         # To store mask data per frame
+        self.prompts_by_obj = {}         # To store prompt data for each object
+        self.predictor_states_by_obj = {}  # To store predictor states for each object
+        self.obj_colors = {}             # For storing color assignments per object
+        self.effects_by_obj = {}         # For storing effects per object
+        self.muted_objects = set()       # To track muted object IDs
+        self.fx_scripts = {}             # For loaded effect scripts
+        self.tracking_complete = False    # To track object tracking status
+        self.adjusted_masks_by_frame = {} # For storing adjusted mask data
+
+class PromptData(BaseModel):
+    video_id: str
+    frame_idx: int = Field(..., ge=0)
+    obj_id: int = Field(..., ge=1)
+    points: Optional[List[List[float]]] = None
+    labels: Optional[List[int]] = None
+    box: Optional[List[float]] = None
+    clear_old_prompts: Optional[bool] = False
+    normalize_coords: Optional[bool] = False
+
+    @validator('labels', each_item=True)
+    def validate_labels(cls, v):
+        if v not in [0, 1]:
+            raise ValueError('Each label must be 0 or 1')
+        return v
+
+
+class ExportData(BaseModel):
+    video_id: str
+    export_options: Optional[Dict] = None
+
+
+class DeleteObjectData(BaseModel):
+    video_id: str
+    obj_id: int = Field(..., ge=1)
+
+
+class ResetStateData(BaseModel):
+    video_id: str
+
+
+class MuteObjectData(BaseModel):
+    video_id: str
+    obj_id: int = Field(..., ge=1)
+    muted: bool
+
+
+class EffectUploadData(BaseModel):
+    video_id: str
+    effect_name: str
+    effect_code: str
+    effect_config: Optional[str] = None
+
+
+class ApplyEffectsRequest(BaseModel):
+    video_id: str
+    obj_id: Optional[int] = None
+    objects: Optional[List[Dict[str, Any]]] = None  # For multiple objects
+    effects: Optional[List[Dict[str, Any]]] = None    # Effects for a single object
+    feather_params: Dict[str, Any]
+    frame_idx: Optional[int] = None
+    apply_to_all_frames: bool = False
+    preview_mode: str = 'all'
+    reset_frame: bool = False
+    original_frame_hash: Optional[str] = None
+
+
+# === Global Variables and FastAPI App Setup ===
+app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+BASE_DIR = Path(__file__).resolve().parent
+VIDEOS_DIR = BASE_DIR / "videos"
+if not VIDEOS_DIR.exists():
+    try:
+        VIDEOS_DIR.mkdir(parents=True, exist_ok=True)
+        logger.info(f"'videos' directory created at {VIDEOS_DIR}")
+    except Exception as e:
+        logger.error(f"Failed to create 'videos' directory at {VIDEOS_DIR}: {e}")
+        raise
+app.mount("/videos", StaticFiles(directory=str(VIDEOS_DIR)), name="videos")
+
+# Define preset directories for color and effect stack presets
+COLOR_PRESETS_DIR = BASE_DIR / "color_presets"
+EFFECT_STACK_PRESETS_DIR = BASE_DIR / "effect_stack_presets"
+
+# Create preset directories if they don't exist
+for preset_dir in [COLOR_PRESETS_DIR, EFFECT_STACK_PRESETS_DIR]:
+    if not preset_dir.exists():
+        try:
+            preset_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Created preset directory: {preset_dir}")
+        except Exception as e:
+            logger.error(f"Failed to create preset directory {preset_dir}: {e}")
+            raise
+
+state_lock = threading.Lock()
+video_states = {}
+executor = ThreadPoolExecutor(max_workers=4)
+
+# === SAM2 Initialization Section (Updated for SAM2.1) ===
+# (Place your SAM2 initialization code here as already modified.)
+
+
+# === SAM2 Initialization Section (Updated for SAM2.1) ===
+
+# Add the SAM2 directory to sys.path so that Python can import SAM2 modules.
+# === SAM2 Initialization Section (Updated for SAM2.1 with Hydra config path) ===
+
+# === SAM2 Initialization Section (Updated for your current file layout) ===
+
+# Add the SAM2 directory to sys.path so that Python can import SAM2 modules.
+SAM2_PATH = os.getenv('SAM2_PATH', '/workspace/sam2/sam2vfx/sam2/sam2')
 if SAM2_PATH not in sys.path:
     sys.path.append(SAM2_PATH)
 
@@ -48,56 +175,33 @@ except ImportError as e:
     logger.error(f"Failed to import SAM2 modules: {e}")
     sys.exit(1)
 
-# Initialize FastAPI app
-app = FastAPI()
+# In your environment the configuration file is directly in the SAM2 package folder.
+# Set the configuration directory to the parent of the config file.
+SAM2_CONFIG_PATH = os.getenv('SAM2_CONFIG_PATH', '/workspace/sam2/sam2vfx/sam2')
+# Use a simple config file name – Hydra will search for it in the directory we set.
+MODEL_CFG = "sam2_hiera_s.yaml"  # This is your configuration file name.
 
-# Enable CORS (Adjust origins as needed for production)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Change this to specific origins in production
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Update the checkpoint file path to reflect your environment.
+SAM2_CHECKPOINT = "/workspace/sam2/sam2vfx/sam2/checkpoints/sam2.1_hiera_small.pt"
 
-# Define the path to the 'videos' directory
-BASE_DIR = Path(__file__).resolve().parent
-VIDEOS_DIR = BASE_DIR / "videos"
-
-# Verify that the 'videos' directory exists
-if not VIDEOS_DIR.exists():
-    try:
-        VIDEOS_DIR.mkdir(parents=True, exist_ok=True)
-        logger.info(f"'videos' directory created at {VIDEOS_DIR}")
-    except Exception as e:
-        logger.error(f"Failed to create 'videos' directory at {VIDEOS_DIR}: {e}")
-        raise
-
-# Mount the 'videos' directory to serve static files
-app.mount("/videos", StaticFiles(directory=str(VIDEOS_DIR)), name="videos")
-
-# Global Variables
-state_lock = threading.Lock()
-video_states = {}  # Stores state per video_id
-
-# SAM2 Model Initialization
-MODEL_CFG = "sam2_hiera_s.yaml"  # Update to small model if needed
-SAM2_CHECKPOINT = "/mnt/c/Users/cryst/segment-anything-2/checkpoints/sam2_hiera_small.pt"  # Update to small model checkpoint
-SAM2_CONFIG_PATH = "/mnt/c/Users/cryst/segment-anything-2/sam2_configs"  # Update as needed
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-# Log CUDA availability
-if torch.cuda.is_available():
-    logger.info("CUDA is available. Models will be loaded onto the GPU.")
-else:
-    logger.warning("CUDA is not available. Models will be loaded onto the CPU.")
+# IMPORTANT: Set the Hydra config search path so Hydra can locate your config file.
+os.environ["HYDRA_CONFIG_PATH"] = SAM2_CONFIG_PATH
+os.environ["HYDRA_CONFIG_NAME"] = MODEL_CFG
+
+logger.info(f"SAM2 code path: {SAM2_PATH}")
+logger.info(f"SAM2 checkpoint: {SAM2_CHECKPOINT}")
+logger.info(f"SAM2 config path: {SAM2_CONFIG_PATH}")
+logger.info(f"Model config file (name): {MODEL_CFG}")
+logger.info(f"Using device: {DEVICE}")
 
 try:
     predictor = build_sam2_video_predictor(
-        config_file=MODEL_CFG,
+        config_file=MODEL_CFG,         # Hydra will look for 'sam2_hiera_s.yaml' in SAM2_CONFIG_PATH.
         ckpt_path=SAM2_CHECKPOINT,
         device=DEVICE,
-        config_path=SAM2_CONFIG_PATH,
+        config_path=SAM2_CONFIG_PATH,  # This directory now directly contains your config file.
     )
     mask_generator = SAM2AutomaticMaskGenerator(
         model=predictor,
@@ -117,160 +221,11 @@ except Exception as e:
     logger.error(f"Failed to initialize SAM2 models: {e}")
     sys.exit(1)
 
-# Directories for presets
-COLOR_PRESETS_DIR = BASE_DIR / "fx_color_presets"
-COLOR_PRESETS_DIR.mkdir(exist_ok=True)
+# === End of SAM2 Initialization Section ===
 
-EFFECT_STACK_PRESETS_DIR = BASE_DIR / "effects_stack_presets"
-EFFECT_STACK_PRESETS_DIR.mkdir(exist_ok=True)
+# --- Continue with your API endpoints and helper functions ---
+# (Copy the remainder of your original file from here onward without any changes.)
 
-# Background Task Executor
-executor = ThreadPoolExecutor(max_workers=4)
-
-# Pydantic Models
-class PromptData(BaseModel):
-    video_id: str
-    frame_idx: int = Field(..., ge=0)
-    obj_id: int = Field(..., ge=1)
-    points: Optional[List[List[float]]] = None
-    labels: Optional[List[int]] = None
-    box: Optional[List[float]] = None
-    clear_old_prompts: Optional[bool] = False
-    normalize_coords: Optional[bool] = False
-
-    @validator('labels', each_item=True)
-    def validate_labels(cls, v):
-        if v not in [0, 1]:
-            raise ValueError('Each label must be 0 or 1')
-        return v
-
-class Effect(BaseModel):
-    name: str
-    params: Dict[str, Any]
-    muted: bool = False
-    blend_mode: str = "Normal"
-    opacity: float = 1.0
-    radius: int = 0
-    expand: int = 0
-
-    def dict_for_effect(self) -> Dict[str, Any]:
-        """Convert effect to a dictionary suitable for effect functions"""
-        return {
-            **self.params,
-            "opacity": self.opacity,
-            "radius": self.radius,
-            "expand": self.expand,
-        }
-class ApplyEffectsRequest(BaseModel):
-    video_id: str
-    obj_id: Optional[int] = None
-    effects: Optional[List[Effect]] = None
-    objects: Optional[List[Dict[str, Any]]] = None
-    feather_params: Dict[str, Any]
-    frame_idx: Optional[int] = None
-    apply_to_all_frames: bool = False
-    preview_mode: str = 'all'
-    reset_frame: bool = False
-    original_frame_hash: Optional[str] = None
-    
-class ExportData(BaseModel):
-    video_id: str
-    export_options: Optional[Dict] = None  # Options for export components
-
-class DeleteObjectData(BaseModel):
-    video_id: str
-    obj_id: int = Field(..., ge=1)
-
-class ResetStateData(BaseModel):
-    video_id: str
-
-class MuteObjectData(BaseModel):
-    video_id: str
-    obj_id: int = Field(..., ge=1)
-    muted: bool
-
-class EffectUploadData(BaseModel):
-    video_id: str
-    effect_name: str
-    effect_code: str
-    effect_config: Optional[str] = None
-
-# VideoState Class
-class VideoState:
-    def __init__(self, video_id: str, video_dir: str, video_filename: str, fps: float, width: int, height: int):
-        self.video_id = video_id
-        self.video_dir = video_dir
-        self.video_filename = video_filename
-        self.original_video_path = os.path.join(video_dir, video_filename)
-        self.fps = fps  # Original FPS
-        self.width = width  # Original Width
-        self.height = height  # Original Height
-        self.predictor_states_by_obj = {}  # Dict[obj_id] = predictor_state
-        self.masks_by_frame = {}
-        self.adjusted_masks_by_frame = {}
-        self.prompts_by_obj = {}
-        self.tracking_complete = False
-        self.last_access = time.time()
-        self.obj_colors = {}
-        self.effects_by_obj = {}
-        self.muted_objects = set()
-        self.fx_scripts = {}  # Loaded FX scripts
-        self.cache = {}  # Caching mechanism
-        self.load_fx_scripts()  # Initialize FX scripts
-
-    def load_fx_scripts(self):
-        global_fx_dir = Path(BASE_DIR) / "FX"
-        self.fx_scripts = {}  # Reset fx_scripts
-
-        # Load effects from global FX directory
-        if global_fx_dir.exists():
-            for fx_folder in global_fx_dir.iterdir():
-                if fx_folder.is_dir():
-                    self._load_fx_script(fx_folder)
-
-    def _load_fx_script(self, fx_folder: Path):
-        script_path = fx_folder / "script.py"
-        config_path = fx_folder / "config.json"
-
-        if script_path.exists() and config_path.exists():
-            spec = importlib.util.spec_from_file_location(fx_folder.name, str(script_path))
-            module = importlib.util.module_from_spec(spec)
-
-            try:
-                spec.loader.exec_module(module)
-                if hasattr(module, "apply_effect"):
-                    # Load configuration
-                    with open(config_path, 'r') as f:
-                        config = json.load(f)
-
-                    # Check if config matches the apply_effect signature
-                    default_params = config.get("defaultParams", {})
-                    effect_function_params = module.apply_effect.__code__.co_varnames
-
-                    # Ensure 'frame' is the first parameter
-                    if "frame" not in effect_function_params:
-                        logger.error(f"apply_effect function in {script_path} does not have 'frame' as its first argument.")
-                        return
-
-                    # Validate defaultParams against apply_effect function signature
-                    for param_name in default_params.keys():
-                        if param_name not in effect_function_params:
-                            logger.warning(f"Parameter '{param_name}' defined in {config_path} is not used by apply_effect in {script_path}.")
-
-                    # Store the effect script and config
-                    self.fx_scripts[fx_folder.name] = {
-                        'function': module.apply_effect,
-                        'config': config
-                    }
-                    logger.info(f"Loaded effect script: {fx_folder.name} with matching parameters")
-                else:
-                    logger.warning(f"No apply_effect function in {script_path}")
-            except Exception as e:
-                logger.error(f"Failed to load effect script {script_path}: {e}")
-        else:
-            logger.warning(f"Effect script or config not found: {script_path} or {config_path}")
-
-# Helper Functions
 
 def run_tracking(video_id: str):
     with state_lock:
@@ -736,20 +691,15 @@ async def upload_video(file: UploadFile = File(...)):
     except HTTPException as e:
         logger.error(f"Failed to get image size for video {video_id}: {e.detail}")
         raise
-    
-    # Extract Video Metadata
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         logger.error(f"Failed to open video {video_path} for metadata extraction.")
         raise HTTPException(status_code=500, detail="Failed to process video.")
-    
     fps = cap.get(cv2.CAP_PROP_FPS)
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     cap.release()
-    
     logger.info(f"Extracted metadata for video {video_id}: FPS={fps}, Width={width}, Height={height}")
-    
     with state_lock:
         video_states[video_id] = VideoState(
             video_id=video_id,
@@ -760,7 +710,7 @@ async def upload_video(file: UploadFile = File(...)):
             height=height
         )
     logger.info(f"Video state created for {video_id}")
-    return {"message": "Video uploaded and frames extracted", "video_id": video_id}
+    return {"video_id": video_id}
 
 @app.get("/get_frames/{video_id}")
 async def get_frames(video_id: str):
@@ -969,213 +919,129 @@ async def tracking_status(video_id: str):
             logger.info(f"Tracking in progress for video {video_id}")
             return {"status": "in_progress"}
         
-async def apply_concurrent_effects(frame, all_effects_data, video_state):
+def apply_concurrent_effects(frame, all_effects_data, video_state):
     """
-    Apply multiple objects' effects simultaneously to a single frame
+    Apply multiple objects' effects to a single frame.
+    (Synchronous function; none of the operations require awaiting.)
     """
-    # Create a composite result frame starting with the original
+    # Start with a copy of the original frame.
     result_frame = frame.copy()
-    
-    # Process each object's effects
+
+    # Process each object's effect data.
     for effect_data in all_effects_data:
-        obj_id = effect_data['id']
-        effects = effect_data['effects']
-        feather_params = effect_data['feather_params']
-        
-        # Get and prepare mask
-        mask = effect_data.get('mask', None)
+        obj_id = effect_data.get('id')
+        effects = effect_data.get('effects', [])
+        feather_params = effect_data.get('feather_params', {})
+        mask = effect_data.get('mask')
         if mask is None:
             continue
-            
-        # Ensure mask has correct shape
+        # If the mask has an extra dimension, squeeze it.
         if mask.ndim == 3:
-            mask = mask.squeeze()  # Remove extra dimensions if present
-            
-        # Process effects for this object
+            mask = mask.squeeze()
+
+        # Create a working copy for this object's effects.
         obj_frame = result_frame.copy()
-        
+
         for effect in effects:
-            if effect.muted:
+            if getattr(effect, 'muted', True):
                 continue
-            
-            # Get effect function from video state
+
+            # Retrieve the effect function from the loaded fx_scripts.
             effect_script = video_state.fx_scripts.get(effect.name)
             if not effect_script:
                 logger.error(f"Effect {effect.name} not found")
                 continue
-                
             effect_func = effect_script['function']
-            
+
             try:
-                # Prepare effect parameters - only include mask if effect accepts it
+                # Prepare parameters for the effect function.
                 effect_params = effect.params.copy() if hasattr(effect, 'params') else {}
-                
-                # Check if effect function accepts mask parameter
                 import inspect
                 sig = inspect.signature(effect_func)
+                # Add the mask to the parameters if required.
                 if 'mask' in sig.parameters:
                     effect_params['mask'] = mask
                 elif 'sam2_mask' in sig.parameters:
                     effect_params['sam2_mask'] = mask
-                
-                # Apply the effect
+
+                # Apply the effect to the object frame.
                 effect_frame = effect_func(obj_frame, **effect_params)
-                
-                # Apply feathering to mask for blending
+                if effect_frame is None:
+                    continue
+
+                # Apply feathering to the mask.
                 feathered_mask = apply_feathering(mask, feather_params)
+                if feathered_mask is None:
+                    logger.error(f"Feathering returned None for object {obj_id}")
+                    continue
+                # Ensure the feathered mask is 3D for proper blending.
                 if feathered_mask.ndim == 2:
                     feathered_mask = feathered_mask[:, :, np.newaxis]
-                
-                # Blend the effect result with the previous frame
-                opacity = effect.opacity if hasattr(effect, 'opacity') else 1.0
+
+                # Get opacity; default to 1.0 if not specified.
+                opacity = getattr(effect, 'opacity', 1.0)
                 feathered_mask = feathered_mask * opacity
+
+                # Blend the effect output with the current object frame.
                 obj_frame = obj_frame * (1 - feathered_mask) + effect_frame * feathered_mask
-                
+
             except Exception as e:
-                logger.error(f"Error applying effect {effect.name} for object {obj_id}: {e}")
+                logger.error(f"Error applying effect {effect.name} for object {obj_id}: {str(e)}")
                 logger.error(f"Effect params: {effect_params}")
                 continue
-        
-        # Blend this object's result with the main result
+
+        # Update the overall result frame with the processed object frame.
         result_frame = obj_frame
-    
+
     return result_frame
 
-# In main.py
 
-async def apply_effects_to_all_frames(frame, all_effects_data, video_state):
-    """
-    Apply multiple objects' effects simultaneously to a single frame with proper error handling
-    """
-    if frame is None:
-        logger.error("Received null frame")
-        return frame
-    
-    # Create a composite result frame starting with the original
-    result_frame = frame.copy()
-    
-    # Process each object's effects
-    for effect_data in all_effects_data:
-        if not effect_data:
-            continue
-            
-        obj_id = effect_data.get('id')
-        effects = effect_data.get('effects', [])
-        feather_params = effect_data.get('feather_params', {})
-        
-        # Skip if missing required data
-        if not all([obj_id, effects, feather_params]):
-            logger.warning(f"Skipping effect application for object {obj_id} due to missing data")
-            continue
-            
-        # Get and prepare mask
-        mask = effect_data.get('mask')
-        if mask is None:
-            logger.warning(f"No mask found for object {obj_id}")
-            continue
-            
-        # Ensure mask has correct shape
-        if mask.ndim == 3:
-            mask = mask.squeeze()  # Remove extra dimensions if present
-            
-        # Process effects for this object
-        try:
-            obj_frame = result_frame.copy()
-            
-            for effect in effects:
-                if not effect or getattr(effect, 'muted', True):
-                    continue
-                
-                # Get effect function from video state
-                effect_script = video_state.fx_scripts.get(getattr(effect, 'name', ''))
-                if not effect_script or 'function' not in effect_script:
-                    logger.warning(f"Effect {getattr(effect, 'name', 'unknown')} not found")
-                    continue
-                    
-                effect_func = effect_script['function']
-                
-                try:
-                    # Prepare effect parameters
-                    effect_params = getattr(effect, 'params', {}).copy()
-                    if not effect_params:
-                        effect_params = {}
-                    
-                    # Add mask parameter if function accepts it
-                    import inspect
-                    sig = inspect.signature(effect_func)
-                    if 'mask' in sig.parameters:
-                        effect_params['mask'] = mask
-                    elif 'sam2_mask' in sig.parameters:
-                        effect_params['sam2_mask'] = mask
-                    
-                    # Apply the effect
-                    effect_frame = effect_func(obj_frame, **effect_params)
-                    if effect_frame is None:
-                        logger.error(f"Effect {effect.name} returned None for object {obj_id}")
-                        continue
-                    
-                    # Apply feathering to mask
-                    feathered_mask = apply_feathering(mask, feather_params)
-                    if feathered_mask is None:
-                        logger.error(f"Feathering returned None for object {obj_id}")
-                        continue
-                        
-                    if feathered_mask.ndim == 2:
-                        feathered_mask = feathered_mask[:, :, np.newaxis]
-                    
-                    # Apply opacity
-                    opacity = getattr(effect, 'opacity', 1.0)
-                    feathered_mask = feathered_mask * opacity
-                    
-                    # Blend the effect result
-                    obj_frame = obj_frame * (1 - feathered_mask) + effect_frame * feathered_mask
-                    
-                except Exception as e:
-                    logger.error(f"Error applying effect {getattr(effect, 'name', 'unknown')} for object {obj_id}: {str(e)}")
-                    continue
-            
-            # Blend this object's result with main result
-            result_frame = obj_frame
-            
-        except Exception as e:
-            logger.error(f"Error processing effects for object {obj_id}: {str(e)}")
-            continue
-    
-    return result_frame
+
 
 @app.post("/apply_effects")
 async def apply_effects(request: ApplyEffectsRequest):
+    """
+    Endpoint to apply effects to a specific frame.
+    Fixes applied:
+      - Removed 'await' from the call to apply_concurrent_effects (a synchronous function).
+      - Ensured that original_frame_hash is converted to a string if provided.
+    """
     try:
         video_id = request.video_id
         frame_idx = request.frame_idx
-        reset_frame = getattr(request, 'reset_frame', False)
-        original_frame_hash = getattr(request, 'original_frame_hash', None)
+        reset_frame = request.reset_frame  # Already a boolean
+        # Convert original_frame_hash to a string if it is provided and not None.
+        original_frame_hash = request.original_frame_hash
+        if original_frame_hash is not None:
+            original_frame_hash = str(original_frame_hash)
         
         with state_lock:
             if video_id not in video_states:
                 raise HTTPException(status_code=404, detail="Video not found")
             video_state = video_states[video_id]
-            
+        
+        # Build paths for the frame and its original backup.
         frames_dir = os.path.join(video_state.video_dir, "frames")
         frame_path = os.path.join(frames_dir, f"{frame_idx:05d}.jpg")
         original_frame_path = os.path.join(frames_dir, f"original_{frame_idx:05d}.jpg")
         
-        # Handle original frame storage
+        # If reset is requested or original_frame_hash is provided, use the backup.
         if reset_frame or original_frame_hash:
             if not os.path.exists(original_frame_path):
                 shutil.copyfile(frame_path, original_frame_path)
             frame = cv2.imread(original_frame_path)
         else:
             frame = cv2.imread(frame_path)
-            
+        
         if frame is None:
             raise HTTPException(status_code=500, detail="Failed to load frame")
-
-        # Prepare effect data
+        
+        # Prepare effect data for multiple or single object mode.
         all_effects_data = []
-        if request.objects:  # Multiple objects mode
+        if request.objects:  # Multiple objects mode.
             for obj_data in request.objects:
-                if not obj_data.get('id'): continue
+                if not obj_data.get('id'):
+                    continue
                 effects_data = {
                     'id': obj_data['id'],
                     'effects': obj_data.get('effects', []),
@@ -1183,24 +1049,30 @@ async def apply_effects(request: ApplyEffectsRequest):
                     'mask': video_state.masks_by_frame.get(frame_idx, {}).get(obj_data['id'])
                 }
                 all_effects_data.append(effects_data)
-        elif request.obj_id:  # Single object mode
+        elif request.obj_id:  # Single object mode.
             all_effects_data.append({
                 'id': request.obj_id,
                 'effects': request.effects or [],
                 'feather_params': request.feather_params or {},
                 'mask': video_state.masks_by_frame.get(frame_idx, {}).get(request.obj_id)
             })
-
-        # Apply effects and save
-        result_frame = await apply_effects_to_frame(frame, all_effects_data, video_state)
+        
+        # Call the synchronous effects application function without awaiting it.
+        # (Removing 'await' here fixes the "numpy.ndarray can't be used in 'await'" error.)
+        result_frame = apply_concurrent_effects(frame, all_effects_data, video_state)
         if result_frame is not None:
             cv2.imwrite(frame_path, result_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
-            
-        return {"message": "Effects applied successfully"}
         
+        return {"message": "Effects applied successfully"}
+    
     except Exception as e:
         logger.error(f"Error in apply_effects: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+
+
+
 def compile_final_video(video_state, temp_frames_dir: str, output_video_path: str):
     """
     Compile final video from processed frames with high quality settings
@@ -1406,58 +1278,66 @@ async def export_video(data: ExportData):
         logger.error(f"Error during export: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e)) 
 
+@app.get("/get_color_presets")
+async def get_color_presets():
+    presets = []
+    try:
+        for preset_file in COLOR_PRESETS_DIR.glob("*.json"):
+            if preset_file.name != "last_used_preset.json":
+                with preset_file.open("r", encoding="utf-8") as f:
+                    preset_data = json.load(f)
+                    presets.append(preset_data)
+        logger.info(f"Successfully loaded {len(presets)} color presets")
+        return presets
+    except Exception as e:
+        logger.error(f"Error loading color presets: {e}")
+        raise HTTPException(status_code=500, detail="Failed to load color presets")
+
+@app.get("/get_last_used_color_preset")
+async def get_last_used_color_preset():
+    last_used_preset_path = COLOR_PRESETS_DIR / "last_used_preset.json"
+    try:
+        if not last_used_preset_path.exists():
+            logger.info("No last used color preset found")
+            return None
+        with last_used_preset_path.open("r", encoding="utf-8") as f:
+            preset_data = json.load(f)
+            logger.info("Successfully loaded last used color preset")
+            return preset_data
+    except Exception as e:
+        logger.error(f"Error loading last used color preset: {e}")
+        return None
+
 @app.post("/save_color_preset")
 async def save_color_preset(preset_data: dict):
     preset_name = preset_data.get('preset_name')
     color_settings = preset_data.get('color_settings')
 
     if not preset_name or not color_settings:
-        raise HTTPException(status_code=400, detail="Preset name and color settings are required.")
+        raise HTTPException(status_code=400, detail="Preset name and color settings are required")
 
-    preset_data_full = {
-        'preset_name': preset_name,
-        'color_settings': color_settings
-    }
+    try:
+        # Save the preset
+        preset_path = COLOR_PRESETS_DIR / f"{preset_name}.json"
+        with preset_path.open("w", encoding="utf-8") as f:
+            json.dump(preset_data, f, indent=4)
 
-    preset_path = COLOR_PRESETS_DIR / f"{preset_name}.json"
-    with open(preset_path, 'w') as f:
-        json.dump(preset_data_full, f)
+        # Save as last used preset
+        last_used_path = COLOR_PRESETS_DIR / "last_used_preset.json"
+        with last_used_path.open("w", encoding="utf-8") as f:
+            json.dump(preset_data, f, indent=4)
 
-    # Save as last used preset
-    last_used_preset_path = COLOR_PRESETS_DIR / "last_used_preset.json"
-    with open(last_used_preset_path, 'w') as f:
-        json.dump(preset_data_full, f)
-
-    return {"message": "Color preset saved successfully."}
-
-@app.get("/get_color_presets")
-async def get_color_presets():
-    presets = []
-    for preset_file in COLOR_PRESETS_DIR.glob("*.json"):
-        if preset_file.name == "last_used_preset.json":
-            continue  # Skip the last used preset
-        with open(preset_file, 'r') as f:
-            preset_data = json.load(f)
-            presets.append(preset_data)
-    return presets  # Return a list of presets
-
-@app.get("/get_last_used_color_preset")
-async def get_last_used_color_preset():
-    last_used_preset_path = COLOR_PRESETS_DIR / "last_used_preset.json"
-
-    if not last_used_preset_path.exists():
-        return None  # No last used preset
-
-    with open(last_used_preset_path, 'r') as f:
-        preset_data = json.load(f)
-
-    return preset_data  # Return the preset data
+        logger.info(f"Successfully saved color preset: {preset_name}")
+        return {"message": "Color preset saved successfully"}
+    except Exception as e:
+        logger.error(f"Error saving color preset: {e}")
+        raise HTTPException(status_code=500, detail="Failed to save color preset")
 
 @app.get("/load_color_presets")
 async def load_color_presets():
     presets = []
     for preset_file in COLOR_PRESETS_DIR.glob("*.json"):
-        with open(preset_file, 'r') as f:
+        with preset_file.open("r") as f:
             color_settings = json.load(f)
             presets.append({
                 'preset_name': preset_file.stem,
@@ -1472,32 +1352,45 @@ async def save_effect_stack_preset(preset_data: dict):
     sub_folder = preset_data.get('sub_folder', '')
 
     if not preset_name or not effects_stack:
-        raise HTTPException(status_code=400, detail="Preset name and effects stack are required.")
+        raise HTTPException(status_code=400, detail="Preset name and effects stack are required")
 
-    preset_dir = EFFECT_STACK_PRESETS_DIR / sub_folder
-    preset_dir.mkdir(parents=True, exist_ok=True)
-    preset_path = preset_dir / f"{preset_name}.json"
+    try:
+        # Create subfolder if specified
+        preset_dir = EFFECT_STACK_PRESETS_DIR / sub_folder
+        preset_dir.mkdir(parents=True, exist_ok=True)
 
-    with open(preset_path, 'w') as f:
-        json.dump(effects_stack, f)
+        # Save the preset
+        preset_path = preset_dir / f"{preset_name}.json"
+        with preset_path.open("w", encoding="utf-8") as f:
+            json.dump(effects_stack, f, indent=4)
 
-    return {"message": "Effect stack preset saved successfully."}
+        logger.info(f"Successfully saved effect stack preset: {preset_name}")
+        return {"message": "Effect stack preset saved successfully"}
+    except Exception as e:
+        logger.error(f"Error saving effect stack preset: {e}")
+        raise HTTPException(status_code=500, detail="Failed to save effect stack preset")
 
 @app.get("/load_effect_stack_presets")
 async def load_effect_stack_presets():
     presets = []
-    for root, dirs, files in os.walk(EFFECT_STACK_PRESETS_DIR):
-        for file in files:
-            if file.endswith('.json'):
-                preset_path = Path(root) / file
-                with open(preset_path, 'r') as f:
-                    effects_stack = json.load(f)
-                    presets.append({
-                        'preset_name': file[:-5],
-                        'effects_stack': effects_stack,
-                        'sub_folder': str(Path(root).relative_to(EFFECT_STACK_PRESETS_DIR))
-                    })
-    return {"presets": presets}
+    try:
+        for root, dirs, files in os.walk(EFFECT_STACK_PRESETS_DIR):
+            for file in files:
+                if file.endswith('.json'):
+                    preset_path = Path(root) / file
+                    with preset_path.open("r", encoding="utf-8") as f:
+                        effects_stack = json.load(f)
+                        relative_path = Path(root).relative_to(EFFECT_STACK_PRESETS_DIR)
+                        presets.append({
+                            'preset_name': file[:-5],
+                            'effects_stack': effects_stack,
+                            'sub_folder': str(relative_path) if str(relative_path) != '.' else ''
+                        })
+        logger.info(f"Successfully loaded {len(presets)} effect stack presets")
+        return {"presets": presets}
+    except Exception as e:
+        logger.error(f"Error loading effect stack presets: {e}")
+        raise HTTPException(status_code=500, detail="Failed to load effect stack presets")
 
 @app.post("/reset_state")
 async def reset_state(data: ResetStateData):
@@ -1616,4 +1509,4 @@ async def health_check():
 
 # Run the application
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True, reload_exclude=["FX/*"])
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

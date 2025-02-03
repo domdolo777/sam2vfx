@@ -20,15 +20,12 @@ const blendingModes = [
   'Lighten',
   'Color Dodge',
   'Color Burn',
-  'Hard Light',
-  'Soft Light',
-  'Difference',
-  'Exclusion',
   'Hue',
   'Saturation',
   'Color',
   'Luminosity',
 ];
+
 
 const EffectBlock = ({
   effect,

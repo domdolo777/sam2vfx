@@ -24,7 +24,10 @@
     "react-konva": "^18.2.10",
     "react-scripts": "5.0.1",
     "react-toastify": "^10.0.5",
-    "web-vitals": "^2.1.4"
+    "web-vitals": "^2.1.4",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.45",
+    "tailwindcss": "^3.4.11"
   },
   "scripts": {
     "start": "react-scripts start",
@@ -32,27 +35,12 @@
     "test": "react-scripts test",
     "eject": "react-scripts eject"
   },
-  "eslintConfig": {
-    "extends": [
-      "react-app",
-      "react-app/jest"
-    ]
+  "proxy": "https://sn1gmmpu7vmu3n-8000.proxy.runpod.net",
+  "devDependencies": {
+    "@babel/plugin-proposal-private-property-in-object": "^7.21.11"
   },
   "browserslist": {
-    "production": [
-      ">0.2%",
-      "not dead",
-      "not op_mini all"
-    ],
-    "development": [
-      "last 1 chrome version",
-      "last 1 firefox version",
-      "last 1 safari version"
-    ]
-  },
-  "devDependencies": {
-    "autoprefixer": "^10.4.20",
-    "postcss": "^8.4.45",
-    "tailwindcss": "^3.4.11"
+    "production": [],
+    "development": []
   }
 }

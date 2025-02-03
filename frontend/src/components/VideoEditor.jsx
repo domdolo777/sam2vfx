@@ -166,7 +166,7 @@ function VideoEditor({ videoId }) {
   // Function to load the last used color preset
   const loadLastUsedColorPreset = useCallback(async () => {
     try {
-      const response = await axios.get('http://localhost:8000/get_last_used_color_preset');
+      const response = await axios.get('/get_last_used_color_preset');
       if (response.status === 200 && response.data) {
         setGlobalColorSettings(response.data.color_settings);
         applyGlobalColors(response.data.color_settings);
@@ -184,7 +184,7 @@ function VideoEditor({ videoId }) {
   // Fetch Color Presets
   const fetchColorPresets = useCallback(async () => {
     try {
-      const response = await axios.get('http://localhost:8000/get_color_presets');
+      const response = await axios.get('/get_color_presets');
       setColorPresets(response.data); // Assuming the API returns an array of presets
     } catch (error) {
       console.error('Error fetching color presets:', error);
@@ -195,7 +195,7 @@ function VideoEditor({ videoId }) {
   const fetchEffectLibrary = useCallback(async () => {
     setIsLoadingEffects(true);
     try {
-      const response = await axios.get(`http://localhost:8000/get_effects/${videoId}`);
+      const response = await axios.get(`/get_effects/${videoId}`);
       setEffectLibrary(response.data.effects);
     } catch (error) {
       console.error('Error fetching effect library:', error);
@@ -207,7 +207,7 @@ function VideoEditor({ videoId }) {
   // Load Color Presets
   const loadColorPresets = useCallback(async () => {
     try {
-      const response = await axios.get('http://localhost:8000/load_color_presets');
+      const response = await axios.get('/load_color_presets');
       setColorPresets(response.data.presets);
     } catch (error) {
       console.error('Error loading color presets:', error);
@@ -217,7 +217,7 @@ function VideoEditor({ videoId }) {
   // Load Effect Stack Presets
   const loadEffectStackPresets = useCallback(async () => {
     try {
-      const response = await axios.get('http://localhost:8000/load_effect_stack_presets');
+      const response = await axios.get('/load_effect_stack_presets');
       setEffectStackPresets(response.data.presets);
     } catch (error) {
       console.error('Error loading effect stack presets:', error);
@@ -250,7 +250,7 @@ function VideoEditor({ videoId }) {
     };
 
     try {
-      const response = await axios.post('http://localhost:8000/save_color_preset', presetData);
+      const response = await axios.post('/save_color_preset', presetData);
       if (response.status === 200) {
         alert('Color preset saved successfully.');
         setNewColorPresetName('');
@@ -317,7 +317,7 @@ function VideoEditor({ videoId }) {
     };
 
     try {
-      const response = await axios.post('http://localhost:8000/upload_effect', effectData);
+      const response = await axios.post('/upload_effect', effectData);
       if (response.status === 200) {
         // Effect uploaded successfully, now fetch the updated effect list
         await fetchEffectLibrary();
@@ -338,7 +338,7 @@ function VideoEditor({ videoId }) {
     if (!presetName) return;
 
     try {
-      await axios.post('http://localhost:8000/save_color_preset', {
+      await axios.post('/save_color_preset', {
         preset_name: presetName,
         color_settings: colorSettings,
       });
@@ -361,7 +361,7 @@ function VideoEditor({ videoId }) {
     if (!selectedObject) return;
 
     try {
-      await axios.post('http://localhost:8000/save_effect_stack_preset', {
+      await axios.post('/save_effect_stack_preset', {
         preset_name: presetName,
         effects_stack: selectedObject.effects,
         sub_folder: subFolder,
@@ -432,7 +432,7 @@ function VideoEditor({ videoId }) {
   useEffect(() => {
     const fetchFrames = async () => {
       try {
-        const response = await axios.get(`http://localhost:8000/get_frames/${videoId}`);
+        const response = await axios.get(`/get_frames/${videoId}`);
         setFrames(response.data.frames);
       } catch (error) {
         console.error('Error fetching frames:', error);
@@ -494,7 +494,7 @@ function VideoEditor({ videoId }) {
   const fetchMasks = useCallback(
     async (frameIdx) => {
       try {
-        const response = await axios.get(`http://localhost:8000/get_masks/${videoId}/${frameIdx}`);
+        const response = await axios.get(`/get_masks/${videoId}/${frameIdx}`);
         const masks = response.data.masks;
         drawMasks(masks);
       } catch (error) {
@@ -597,7 +597,7 @@ function VideoEditor({ videoId }) {
 
       try {
         // Send the data to the backend
-        await axios.post('http://localhost:8000/add_prompts', data);
+        await axios.post('/add_prompts', data);
         console.log(`Prompts for object ${objId} sent successfully`);
       } catch (error) {
         console.error(`Error sending prompts for object ${objId}:`, error);
@@ -683,7 +683,7 @@ const applyEffects = useCallback(async () => {
 
     console.log('Sending apply effects request with data:', JSON.stringify(effectData));
 
-    await axios.post('http://localhost:8000/apply_effects', effectData);
+    await axios.post('/apply_effects', effectData);
     setFrameVersion((prev) => prev + 1);
   } catch (error) {
     console.error('Error applying effects:', error);
@@ -710,7 +710,7 @@ const applyEffectsToAllFrames = useCallback(async () => {
     console.log('Sending apply effects to all frames request with data:', JSON.stringify(effectData));
 
     // Make the request
-    await axios.post('http://localhost:8000/apply_effects', effectData);
+    await axios.post('/apply_effects', effectData);
     setFrameVersion((prev) => prev + 1);
   } catch (error) {
     console.error('Error applying effects to all frames:', error);
@@ -774,10 +774,10 @@ const applyEffectsToAllFrames = useCallback(async () => {
   const trackObjects = async () => {
     try {
       setTrackingInProgress(true);
-      await axios.post('http://localhost:8000/track_objects', { video_id: videoId });
+      await axios.post('/track_objects', { video_id: videoId });
       const checkTrackingStatus = async () => {
         try {
-          const statusResponse = await axios.get(`http://localhost:8000/tracking_status/${videoId}`);
+          const statusResponse = await axios.get(`/tracking_status/${videoId}`);
           if (statusResponse.data.status === 'complete') {
             setTrackingInProgress(false);
             alert('Tracking complete.');
@@ -802,11 +802,11 @@ const applyEffectsToAllFrames = useCallback(async () => {
   const exportVideo = useCallback(
     async (options) => {
       try {
-        const response = await axios.post('http://localhost:8000/export', {
+        const response = await axios.post('/export', {
           video_id: videoId,
           export_options: options,
         });
-        window.open(`http://localhost:8000${response.data.download_url}`, '_blank');
+        window.open(`${response.data.download_url}`, '_blank');
       } catch (error) {
         console.error('Error exporting video:', error);
         alert('Error exporting video.');
@@ -818,7 +818,7 @@ const applyEffectsToAllFrames = useCallback(async () => {
   // Reset Application State
   const resetState = useCallback(async () => {
     try {
-      await axios.post('http://localhost:8000/reset_state', { video_id: videoId });
+      await axios.post('/reset_state', { video_id: videoId });
       setCurrentFrameIndex(0);
       setPlaying(false);
       setMarkers([]);
@@ -891,7 +891,7 @@ const applyEffectsToAllFrames = useCallback(async () => {
   // Delete Object
   const deleteObject = async (id) => {
     try {
-      await axios.post('http://localhost:8000/delete_object', {
+      await axios.post('/delete_object', {
         video_id: videoId,
         obj_id: id,
       });
@@ -920,7 +920,7 @@ const applyEffectsToAllFrames = useCallback(async () => {
     try {
       const objIndex = objects.findIndex((obj) => obj.id === id);
       const newMutedState = !objects[objIndex].muted;
-      await axios.post('http://localhost:8000/mute_object', {
+      await axios.post('/mute_object', {
         video_id: videoId,
         obj_id: id,
         muted: newMutedState,
@@ -2031,7 +2031,7 @@ useEffect(() => {
                   <>
                     <img
                       key={`${currentFrameIndex}-${frameVersion}`}
-                      src={`http://localhost:8000${frames[currentFrameIndex]}?v=${frameVersion}`}
+                      src={`${frames[currentFrameIndex]}?v=${frameVersion}`}
                       alt="Current Frame"
                       onClick={handleFrameClick}
                       onLoad={handleImageLoad}
@@ -2134,3 +2134,4 @@ useEffect(() => {
 }
 
 export default VideoEditor;
+

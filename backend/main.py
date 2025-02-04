@@ -8,7 +8,8 @@ from typing import List, Optional, Dict, Any
 from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
+
 import uvicorn
 import base64
 import cv2
@@ -23,6 +24,7 @@ import importlib.util
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 from fastapi.responses import FileResponse
+import hashlib
 
 # === Logging Setup ===
 logging.basicConfig(
@@ -66,51 +68,64 @@ class PromptData(BaseModel):
     clear_old_prompts: Optional[bool] = False
     normalize_coords: Optional[bool] = False
 
-    @validator('labels', each_item=True)
-    def validate_labels(cls, v):
-        if v not in [0, 1]:
-            raise ValueError('Each label must be 0 or 1')
+    @field_validator('labels')
+    @classmethod
+    def validate_labels(cls, v: List[int]) -> List[int]:
+        if any(label not in {0, 1} for label in v):
+            raise ValueError('All labels must be 0 or 1')
         return v
 
 
 class ExportData(BaseModel):
-    video_id: str
-    export_options: Optional[Dict] = None
+    video_id: str = Field(..., json_schema_extra={"examples": ["video-uuid"]})
+    export_options: Optional[Dict] = Field(
+        None,
+        json_schema_extra={"examples": [{"video_with_effects": True}]}
+    )
 
 
 class DeleteObjectData(BaseModel):
     video_id: str
-    obj_id: int = Field(..., ge=1)
+    obj_id: int = Field(..., ge=1, json_schema_extra={"examples": [1]})
 
 
 class ResetStateData(BaseModel):
-    video_id: str
+    video_id: str = Field(..., json_schema_extra={"examples": ["video-uuid"]})
 
 
 class MuteObjectData(BaseModel):
     video_id: str
-    obj_id: int = Field(..., ge=1)
-    muted: bool
+    obj_id: int = Field(..., ge=1, json_schema_extra={"examples": [1]})
+    muted: bool = Field(..., json_schema_extra={"examples": [True]})
 
 
 class EffectUploadData(BaseModel):
-    video_id: str
-    effect_name: str
-    effect_code: str
-    effect_config: Optional[str] = None
+    video_id: str = Field(..., json_schema_extra={"examples": ["video-uuid"]})
+    effect_name: str = Field(..., json_schema_extra={"examples": ["cool_effect"]})
+    effect_code: str = Field(..., json_schema_extra={"examples": ["def apply(): ..."]})
+    effect_config: Optional[str] = Field(
+        None,
+        json_schema_extra={"examples": [json.dumps({"param": "value"})]}
+    )
 
 
 class ApplyEffectsRequest(BaseModel):
     video_id: str
-    obj_id: Optional[int] = None
-    objects: Optional[List[Dict[str, Any]]] = None  # For multiple objects
-    effects: Optional[List[Dict[str, Any]]] = None    # Effects for a single object
-    feather_params: Dict[str, Any]
-    frame_idx: Optional[int] = None
-    apply_to_all_frames: bool = False
-    preview_mode: str = 'all'
-    reset_frame: bool = False
-    original_frame_hash: Optional[str] = None
+    obj_id: int
+    effects: list[dict] = Field(default_factory=list)  # Allow empty list
+    feather_params: dict = Field(default_factory=dict)  # Provide empty dict default
+    frame_idx: int
+    preview_mode: str
+    reset_frame: bool
+    original_frame_hash: str = Field(
+        ...,
+        min_length=32,
+        max_length=32,
+        pattern=r"^[a-f0-9]{32}$",
+        json_schema_extra={"examples": ["d41d8cd98f00b204e9800998ecf8427e"]}
+    )
+
+
 
 
 # === Global Variables and FastAPI App Setup ===
@@ -136,7 +151,7 @@ app.mount("/videos", StaticFiles(directory=str(VIDEOS_DIR)), name="videos")
 
 # Define preset directories for color and effect stack presets
 COLOR_PRESETS_DIR = BASE_DIR / "color_presets"
-EFFECT_STACK_PRESETS_DIR = BASE_DIR / "effect_stack_presets"
+EFFECT_STACK_PRESETS_DIR = BASE_DIR / "effects_stack_presets"  # ✅ Plural "effects"
 
 # Create preset directories if they don't exist
 for preset_dir in [COLOR_PRESETS_DIR, EFFECT_STACK_PRESETS_DIR]:
@@ -226,6 +241,14 @@ except Exception as e:
 # --- Continue with your API endpoints and helper functions ---
 # (Copy the remainder of your original file from here onward without any changes.)
 
+
+def compute_frame_hash(video_id, frame_idx):
+    frame_path = f"videos/{video_id}/frames/{frame_idx:05d}.jpg"
+    if not os.path.exists(frame_path):
+        return ""
+    
+    with open(frame_path, "rb") as f:
+        return hashlib.md5(f.read()).hexdigest()
 
 def run_tracking(video_id: str):
     with state_lock:
@@ -1000,74 +1023,53 @@ def apply_concurrent_effects(frame, all_effects_data, video_state):
 
 @app.post("/apply_effects")
 async def apply_effects(request: ApplyEffectsRequest):
-    """
-    Endpoint to apply effects to a specific frame.
-    Fixes applied:
-      - Removed 'await' from the call to apply_concurrent_effects (a synchronous function).
-      - Ensured that original_frame_hash is converted to a string if provided.
-    """
     try:
-        video_id = request.video_id
-        frame_idx = request.frame_idx
-        reset_frame = request.reset_frame  # Already a boolean
-        # Convert original_frame_hash to a string if it is provided and not None.
-        original_frame_hash = request.original_frame_hash
-        if original_frame_hash is not None:
-            original_frame_hash = str(original_frame_hash)
-        
-        with state_lock:
-            if video_id not in video_states:
-                raise HTTPException(status_code=404, detail="Video not found")
-            video_state = video_states[video_id]
-        
-        # Build paths for the frame and its original backup.
-        frames_dir = os.path.join(video_state.video_dir, "frames")
-        frame_path = os.path.join(frames_dir, f"{frame_idx:05d}.jpg")
-        original_frame_path = os.path.join(frames_dir, f"original_{frame_idx:05d}.jpg")
-        
-        # If reset is requested or original_frame_hash is provided, use the backup.
-        if reset_frame or original_frame_hash:
-            if not os.path.exists(original_frame_path):
-                shutil.copyfile(frame_path, original_frame_path)
-            frame = cv2.imread(original_frame_path)
-        else:
-            frame = cv2.imread(frame_path)
-        
+        current_hash = compute_frame_hash(request.video_id, request.frame_idx)
+        if not current_hash:
+            raise HTTPException(status_code=404, detail="Frame not found")
+        if request.original_frame_hash != current_hash:
+            raise HTTPException(
+                status_code=409,
+                detail="Frame content has changed since initial processing"
+            )
+
+        video_state = video_states(request.video_id)
+        frame_path = os.path.join(video_state.video_dir, "frames", f"{request.frame_idx:05d}.jpg")
+        original_frame_path = os.path.join(video_state.video_dir, "frames", f"original_{request.frame_idx:05d}.jpg")
+
+        if request.reset_frame or not os.path.exists(original_frame_path):
+            os.makedirs(os.path.dirname(original_frame_path), exist_ok=True)
+            if os.path.exists(frame_path):
+                shutil.copy2(frame_path, original_frame_path)
+
+        frame = cv2.imread(original_frame_path if request.reset_frame else frame_path)
         if frame is None:
-            raise HTTPException(status_code=500, detail="Failed to load frame")
+            raise HTTPException(status_code=500, detail="Failed to load frame data")
+
+        effect_data = {
+            "id": request.obj_id,
+            "effects": request.effects,
+            "feather_params": request.feather_params,
+            "mask": video_state.masks_by_frame.get(request.frame_idx, {}).get(request.obj_id)
+        }
+
+        processed_frame = apply_effects_pipeline(
+            frame,
+            [effect_data],
+            video_state.effect_stack
+        )
+
+        if processed_frame is not None:
+            cv2.imwrite(frame_path, processed_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+            return {"status": "success", "processed": True}
         
-        # Prepare effect data for multiple or single object mode.
-        all_effects_data = []
-        if request.objects:  # Multiple objects mode.
-            for obj_data in request.objects:
-                if not obj_data.get('id'):
-                    continue
-                effects_data = {
-                    'id': obj_data['id'],
-                    'effects': obj_data.get('effects', []),
-                    'feather_params': obj_data.get('feather_params', {}),
-                    'mask': video_state.masks_by_frame.get(frame_idx, {}).get(obj_data['id'])
-                }
-                all_effects_data.append(effects_data)
-        elif request.obj_id:  # Single object mode.
-            all_effects_data.append({
-                'id': request.obj_id,
-                'effects': request.effects or [],
-                'feather_params': request.feather_params or {},
-                'mask': video_state.masks_by_frame.get(frame_idx, {}).get(request.obj_id)
-            })
-        
-        # Call the synchronous effects application function without awaiting it.
-        # (Removing 'await' here fixes the "numpy.ndarray can't be used in 'await'" error.)
-        result_frame = apply_concurrent_effects(frame, all_effects_data, video_state)
-        if result_frame is not None:
-            cv2.imwrite(frame_path, result_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
-        
-        return {"message": "Effects applied successfully"}
-    
+        return {"status": "success", "processed": False}
+
+    except HTTPException as he:
+        raise
     except Exception as e:
-        logger.error(f"Error in apply_effects: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Effect application failed: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal processing error")
 
 
 

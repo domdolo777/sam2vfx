@@ -1,10 +1,9 @@
 import { useEffect, useCallback, useRef, useState } from 'react';
 import axios from 'axios';
+import md5 from 'crypto-js/md5';
+import CryptoJS from 'crypto-js';
 
-// Create an axios instance without a hard-coded baseURL so that relative URLs work
-const api = axios.create({
-  // baseURL is omitted so that the proxy in package.json routes requests properly.
-});
+const api = axios.create();
 
 const ConcurrentEffectsManager = ({
   objects,
@@ -18,143 +17,110 @@ const ConcurrentEffectsManager = ({
   const [isProcessing, setIsProcessing] = useState(false);
   const pendingRequestRef = useRef(null);
   const lastAppliedStateRef = useRef(null);
-  const parameterUpdateTimeoutRef = useRef(null);
-  const initialRenderRef = useRef(true);
   const processingFramesRef = useRef(new Set());
-  const originalFramesRef = useRef({});
+  const initialRenderRef = useRef(true);
 
-  // This function updates the effect state by sending a POST request to /apply_effects.
-  // The key update is converting the original_frame_hash to a string.
-  const handleParameterUpdate = useCallback(async (effectData) => {
-    if (isProcessing) return;
-
+  const generateFrameHash = async (frameIdx) => {
     try {
-      setIsProcessing(true);
+      const paddedIndex = String(frameIdx).padStart(5, '0');
+      const frameUrl = `/videos/${videoId}/frames/${paddedIndex}.jpg?v=${Date.now()}`;
+      const response = await fetch(frameUrl);
+      const buffer = await response.arrayBuffer();
+      return md5(CryptoJS.lib.WordArray.create(new Uint8Array(buffer))).toString();
+    } catch (error) {
+      console.error('Frame hash generation failed:', error);
+      return Date.now().toString();
+    }
+  };
 
-      // Cancel any pending request if it exists.
-      if (pendingRequestRef.current?.cancel) {
-        pendingRequestRef.current.cancel();
-      }
-      if (parameterUpdateTimeoutRef.current) {
-        clearTimeout(parameterUpdateTimeoutRef.current);
-      }
+    const handleParameterUpdate = useCallback(async (effectData) => {
+      if (isProcessing) return;
+    
+      try {
+        setIsProcessing(true);
+        const frameHash = await generateFrameHash(currentFrameIndex);
+    
+        // Ensure effects array exists and feather_params has required structure
+        const updateData = {
+          video_id: videoId,
+          frame_idx: currentFrameIndex,
+          obj_id: selectedObjectId,
+          effects: effectData.effects || [],
+          feather_params: {
+            radius: effectData.feather_params?.radius || 0,
+            expand: effectData.feather_params?.expand || 0,
+            opacity: effectData.feather_params?.opacity || 1,
+            invert_mask: effectData.feather_params?.invert_mask || false,
+            invert_intensity: effectData.feather_params?.invert_intensity || 1
+          },
+          preview_mode: effectPreviewMode,
+          reset_frame: true,
+          original_frame_hash: frameHash
+        };
 
-      const CancelToken = axios.CancelToken;
-      const source = CancelToken.source();
-      pendingRequestRef.current = source;
-
-      // Create a unique key for the current frame.
-      const frameKey = `${currentFrameIndex}`;
-      if (processingFramesRef.current.has(frameKey)) return;
-      processingFramesRef.current.add(frameKey);
-
-      // Store a reference value for the frame if it doesn’t already exist.
-      // (We use Date.now() as a simple hash; since Date.now() returns a number,
-      // we will later convert it to a string.)
-      if (!originalFramesRef.current[frameKey]) {
-        originalFramesRef.current[frameKey] = Date.now();
-      }
-
-      // IMPORTANT: Convert the original frame hash to a string.
-      const originalFrameHashStr = originalFramesRef.current[frameKey].toString();
-
-      const updateData = {
-        video_id: videoId,
-        frame_idx: currentFrameIndex,
-        obj_id: selectedObjectId,
-        effects: effectData.effects || [],
-        feather_params: effectData.feather_params || {},
-        preview_mode: effectPreviewMode,
-        reset_frame: true,
-        // Send the hash as a string to satisfy the backend schema
-        original_frame_hash: originalFrameHashStr
-      };
-
-      // Create a hash of the updateData (excluding the original_frame_hash conversion issue)
       const stateHash = JSON.stringify({
         effects: updateData.effects,
         feather_params: updateData.feather_params,
-        frame_idx: updateData.frame_idx,
-        preview_mode: updateData.preview_mode
+        frame_idx: updateData.frame_idx
       });
 
-      // If this state is the same as the last applied one, skip the update.
-      if (lastAppliedStateRef.current === stateHash) {
-        processingFramesRef.current.delete(frameKey);
-        return;
-      }
+      if (lastAppliedStateRef.current === stateHash) return;
 
-      // Send the request using a relative URL (which will be forwarded via your proxy).
-      const response = await api.post('/apply_effects', updateData, {
-        cancelToken: source.token
-      });
+      const response = await api.post('/apply_effects', updateData);
 
       if (response.status === 200) {
         lastAppliedStateRef.current = stateHash;
-        if (onEffectUpdate) {
-          onEffectUpdate();
-        }
+        onEffectUpdate?.();
       }
     } catch (error) {
-      if (!axios.isCancel(error)) {
-        console.error('Error applying effects:', error?.response?.data || error);
+      if (error.response) {
+        if (error.response.status === 422) {
+          const errorMsg = error.response.data.detail?.[0]?.msg || 'Invalid parameters';
+          console.error('Validation Error:', errorMsg);
+          alert(`Validation Error: ${errorMsg}`);
+        }
+        if (error.response.status === 409) {
+          alert('Frame has changed - please reselect object');
+        }
       }
+      console.error('Effect application error:', error);
     } finally {
       setIsProcessing(false);
-      const frameKey = `${currentFrameIndex}`;
-      processingFramesRef.current.delete(frameKey);
-      pendingRequestRef.current = null;
     }
   }, [videoId, currentFrameIndex, selectedObjectId, effectPreviewMode, onEffectUpdate, isProcessing]);
 
-  // Trigger a parameter update when frame index or effect mode changes.
   useEffect(() => {
     lastAppliedStateRef.current = null;
-    if (effectsMode) {
+    if (effectsMode && selectedObjectId) {
       const selectedObject = objects.find(obj => obj.id === selectedObjectId);
       if (selectedObject) {
-        const effectData = {
-          effects: selectedObject.effects,
-          feather_params: selectedObject.featherParams
-        };
-        handleParameterUpdate(effectData);
-      }
-    }
-  }, [currentFrameIndex, effectsMode, objects, selectedObjectId, handleParameterUpdate]);
-
-  // Handle the initial frame update.
-  useEffect(() => {
-    if (!selectedObjectId) return;
-    const selectedObject = objects.find(obj => obj.id === selectedObjectId);
-    if (!selectedObject) return;
-    if (currentFrameIndex === 0 && initialRenderRef.current) {
-      initialRenderRef.current = false;
-      const initTimeout = setTimeout(() => {
         handleParameterUpdate({
           effects: selectedObject.effects,
           feather_params: selectedObject.featherParams
         });
-      }, 100);
-      return () => clearTimeout(initTimeout);
+      }
     }
-  }, [objects, selectedObjectId, currentFrameIndex, handleParameterUpdate]);
+  }, [currentFrameIndex, effectsMode, objects, selectedObjectId, handleParameterUpdate]);
 
-  // Cleanup on unmount.
   useEffect(() => {
-    let processingFramesCurrent = processingFramesRef.current;
-    let parameterTimeoutCurrent = parameterUpdateTimeoutRef.current;
-    let pendingRequestCurrent = pendingRequestRef.current;
-    return () => {
-      if (processingFramesCurrent) {
-        [...processingFramesCurrent].forEach(key => {
-          processingFramesCurrent.delete(key);
+    if (!selectedObjectId || !initialRenderRef.current) return;
+    initialRenderRef.current = false;
+    const timeout = setTimeout(() => {
+      const selectedObject = objects.find(obj => obj.id === selectedObjectId);
+      if (selectedObject) {
+        handleParameterUpdate({
+          effects: selectedObject.effects,
+          feather_params: selectedObject.featherParams
         });
       }
-      if (parameterTimeoutCurrent) {
-        clearTimeout(parameterTimeoutCurrent);
-      }
-      if (pendingRequestCurrent?.cancel) {
-        pendingRequestCurrent.cancel();
+    }, 500);
+    return () => clearTimeout(timeout);
+  }, [objects, selectedObjectId, handleParameterUpdate]);
+
+  useEffect(() => {
+    return () => {
+      if (pendingRequestRef.current?.cancel) {
+        pendingRequestRef.current.cancel();
       }
     };
   }, []);

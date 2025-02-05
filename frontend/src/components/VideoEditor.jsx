@@ -16,7 +16,7 @@ import ConcurrentEffectsManager from './ConcurrentEffectsManager';
 
 
 function VideoEditor({ videoId }) {
-  // State Hooks
+   // State Hooks
   const [frames, setFrames] = useState([]);
   const [currentFrameIndex, setCurrentFrameIndex] = useState(0);
   const [playing, setPlaying] = useState(false);

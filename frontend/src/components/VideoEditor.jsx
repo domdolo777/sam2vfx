@@ -12,9 +12,6 @@ import { SketchPicker } from 'react-color'; // For color picker
 import EffectBlock from './EffectBlock'; // Import your EffectBlock component
 import ConcurrentEffectsManager from './ConcurrentEffectsManager';
 
-
-
-
 function VideoEditor({ videoId }) {
    // State Hooks
   const [frames, setFrames] = useState([]);
@@ -37,6 +34,8 @@ function VideoEditor({ videoId }) {
   const [effectStackPresets, setEffectStackPresets] = useState([]);
   const [isChainMode, setIsChainMode] = useState(false);
   const [isLoadPresetOpen, setIsLoadPresetOpen] = useState(false);
+  const [effectPreviewMode, setEffectPreviewMode] = useState('all');
+  const [concurrentEffectsEnabled, setConcurrentEffectsEnabled] = useState(true);
 
   // Import Effect Modal State
   const [importModalOpen, setImportModalOpen] = useState(false);
@@ -52,11 +51,6 @@ function VideoEditor({ videoId }) {
   // State Hooks for Global Color Settings
   const [isGlobalColorModalOpen, setIsGlobalColorModalOpen] = useState(false);
   const [globalColorSettings, setGlobalColorSettings] = useState({});
-
-  const [effectPreviewMode, setEffectPreviewMode] = useState('all'); // Add this state
-  const [concurrentEffectsEnabled, setConcurrentEffectsEnabled] = useState(true);
-
-
 
   const defaultParamConfigs = {
     opacity: {

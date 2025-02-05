@@ -53,7 +53,7 @@ function VideoEditor({ videoId }) {
   const [isGlobalColorModalOpen, setIsGlobalColorModalOpen] = useState(false);
   const [globalColorSettings, setGlobalColorSettings] = useState({});
 
-  const [concurrentEffectsEnabled] = useState(true);
+  const [concurrentEffectsEnabled, setConcurrentEffectsEnabled] = useState(true);
   const [effectPreviewMode, setEffectPreviewMode] = useState('all'); // Add this state
 
 

@@ -12,8 +12,8 @@
 
 2. Configure Git (only needed once):
    ```bash
-   git config --global user.email "domslegacy@gmail.com"
-   git config --global user.name "domdolo777"
+   git config --global user.email "your.email@example.com"  # Replace with your email
+   git config --global user.name "your_username"           # Replace with your username
    ```
 
 ### Daily Workflow

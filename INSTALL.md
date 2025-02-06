@@ -82,3 +82,9 @@ cd checkpoints
 - Document any issues encountered
 - Track performance optimizations
 - Note system requirements 
+
+## Security Notes
+- Never commit API keys or tokens
+- Store sensitive configuration in .env files (add to .gitignore)
+- Use environment variables for sensitive data
+- Keep effect configurations generic (no personal data) 

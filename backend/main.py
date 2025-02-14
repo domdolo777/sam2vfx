@@ -163,6 +163,111 @@ if not VIDEOS_DIR.exists():
         raise
 app.mount("/videos", StaticFiles(directory=str(VIDEOS_DIR)), name="videos")
 
+# === Video Upload Endpoint ===
+@app.post("/upload_video")
+async def upload_video(video: UploadFile = File(...)):
+    try:
+        # Validate file type
+        if not video.content_type.startswith('video/'):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid file type. Please upload a video file."
+            )
+
+        # Generate a unique ID for the video
+        video_id = str(uuid.uuid4())
+        
+        # Create a directory for this video
+        video_dir = VIDEOS_DIR / video_id
+        frames_dir = video_dir / "frames"
+        os.makedirs(frames_dir, exist_ok=True)
+        
+        # Save the uploaded video
+        video_path = video_dir / video.filename
+        try:
+            with open(video_path, "wb") as buffer:
+                shutil.copyfileobj(video.file, buffer)
+        except Exception as e:
+            logger.error(f"Failed to save video file: {e}")
+            if os.path.exists(video_dir):
+                shutil.rmtree(video_dir)
+            raise HTTPException(status_code=500, detail="Failed to save video file")
+        
+        # Extract video metadata using OpenCV
+        try:
+            cap = cv2.VideoCapture(str(video_path))
+            if not cap.isOpened():
+                raise ValueError("Failed to open video file")
+            
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            cap.release()
+            
+            if fps <= 0 or width <= 0 or height <= 0:
+                raise ValueError("Invalid video dimensions or FPS")
+        except Exception as e:
+            logger.error(f"Failed to extract video metadata: {e}")
+            if os.path.exists(video_dir):
+                shutil.rmtree(video_dir)
+            raise HTTPException(status_code=400, detail="Invalid video file")
+        
+        # Extract frames
+        try:
+            extract_frames(str(video_path), str(frames_dir))
+        except Exception as e:
+            logger.error(f"Failed to extract frames: {e}")
+            if os.path.exists(video_dir):
+                shutil.rmtree(video_dir)
+            raise HTTPException(status_code=500, detail="Failed to extract video frames")
+        
+        # Create video state
+        video_state = VideoState(
+            video_id=video_id,
+            video_dir=str(video_dir),
+            video_filename=video.filename,
+            fps=fps,
+            width=width,
+            height=height
+        )
+        
+        # Store video state
+        with state_lock:
+            video_states[video_id] = video_state
+            
+            # Save video states to file
+            try:
+                with open(BASE_DIR / "video_states.json", "w") as f:
+                    json.dump({
+                        k: {
+                            "video_dir": v.video_dir,
+                            "video_filename": v.video_filename,
+                            "fps": v.fps,
+                            "width": v.width,
+                            "height": v.height,
+                            "last_access": v.last_access
+                        } for k, v in video_states.items()
+                    }, f, indent=2)
+            except Exception as e:
+                logger.error(f"Failed to save video states: {e}")
+                # Don't raise an exception here as the video is already processed
+        
+        return {
+            "video_id": video_id,
+            "fps": fps,
+            "width": width,
+            "height": height,
+            "frame_count": len(os.listdir(frames_dir))
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error during video upload: {e}")
+        if 'video_dir' in locals() and os.path.exists(video_dir):
+            shutil.rmtree(video_dir)
+        raise HTTPException(status_code=500, detail=str(e))
+
 # Define preset directories for color and effect stack presets
 COLOR_PRESETS_DIR = BASE_DIR / "color_presets"
 EFFECT_STACK_PRESETS_DIR = BASE_DIR / "effects_stack_presets"  # ✅ Plural "effects"

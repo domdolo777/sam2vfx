@@ -77,6 +77,7 @@ ln -s configs/sam2.1 sam2.1
 ```bash
 cd ../frontend
 npm install
+npm install crypto-js  # Required for hash calculations
 ```
 
 ## Step 4: Verify Installation

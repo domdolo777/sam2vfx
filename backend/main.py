@@ -9,6 +9,21 @@ from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
+from dotenv import load_dotenv
+from pathlib import Path
+
+# Load environment variables from .env file
+env_path = Path(__file__).resolve().parent / '.env'
+load_dotenv(dotenv_path=env_path)
+
+# Debug: Print environment variables
+print("=== Environment Variables ===")
+print(f"MODEL_CFG: {os.getenv('MODEL_CFG')}")
+print(f"SAM2_PATH: {os.getenv('SAM2_PATH')}")
+print(f"SAM2_CHECKPOINT: {os.getenv('SAM2_CHECKPOINT')}")
+print(f"SAM2_CONFIG_PATH: {os.getenv('SAM2_CONFIG_PATH')}")
+print(f"PYTHONPATH: {os.getenv('PYTHONPATH')}")
+print("===========================")
 
 import uvicorn
 import base64
@@ -16,7 +31,6 @@ import cv2
 import torch
 import threading
 import time
-from pathlib import Path
 import logging
 from PIL import Image
 import colorsys
@@ -168,18 +182,13 @@ video_states = {}
 executor = ThreadPoolExecutor(max_workers=4)
 
 # === SAM2 Initialization Section (Updated for SAM2.1) ===
-# (Place your SAM2 initialization code here as already modified.)
-
-
-# === SAM2 Initialization Section (Updated for SAM2.1) ===
 
 # Add the SAM2 directory to sys.path so that Python can import SAM2 modules.
-# === SAM2 Initialization Section (Updated for SAM2.1 with Hydra config path) ===
+SAM2_PATH = os.getenv('SAM2_PATH')
+if not SAM2_PATH:
+    logger.error("SAM2_PATH environment variable not set")
+    sys.exit(1)
 
-# === SAM2 Initialization Section (Updated for your current file layout) ===
-
-# Add the SAM2 directory to sys.path so that Python can import SAM2 modules.
-SAM2_PATH = os.getenv('SAM2_PATH', '/workspace/sam2/sam2vfx/sam2/sam2')
 if SAM2_PATH not in sys.path:
     sys.path.append(SAM2_PATH)
 
@@ -190,33 +199,26 @@ except ImportError as e:
     logger.error(f"Failed to import SAM2 modules: {e}")
     sys.exit(1)
 
-# In your environment the configuration file is directly in the SAM2 package folder.
-# Set the configuration directory to the parent of the config file.
-SAM2_CONFIG_PATH = os.getenv('SAM2_CONFIG_PATH', '/workspace/sam2/sam2vfx/sam2')
-# Use a simple config file name – Hydra will search for it in the directory we set.
-MODEL_CFG = "sam2_hiera_s.yaml"  # This is your configuration file name.
+# Get model config from environment
+MODEL_CFG = os.getenv('MODEL_CFG', "sam2.1/sam2.1_hiera_s.yaml")
 
-# Update the checkpoint file path to reflect your environment.
-SAM2_CHECKPOINT = "/workspace/sam2/sam2vfx/sam2/checkpoints/sam2.1_hiera_small.pt"
-
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
-# IMPORTANT: Set the Hydra config search path so Hydra can locate your config file.
-os.environ["HYDRA_CONFIG_PATH"] = SAM2_CONFIG_PATH
-os.environ["HYDRA_CONFIG_NAME"] = MODEL_CFG
+# Get checkpoint path from environment
+SAM2_CHECKPOINT = os.getenv('SAM2_CHECKPOINT')
+if not SAM2_CHECKPOINT:
+    logger.error("SAM2_CHECKPOINT environment variable not set")
+    sys.exit(1)
 
 logger.info(f"SAM2 code path: {SAM2_PATH}")
 logger.info(f"SAM2 checkpoint: {SAM2_CHECKPOINT}")
-logger.info(f"SAM2 config path: {SAM2_CONFIG_PATH}")
 logger.info(f"Model config file (name): {MODEL_CFG}")
-logger.info(f"Using device: {DEVICE}")
+
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 try:
     predictor = build_sam2_video_predictor(
-        config_file=MODEL_CFG,         # Hydra will look for 'sam2_hiera_s.yaml' in SAM2_CONFIG_PATH.
+        config_file=MODEL_CFG,
         ckpt_path=SAM2_CHECKPOINT,
-        device=DEVICE,
-        config_path=SAM2_CONFIG_PATH,  # This directory now directly contains your config file.
+        device=DEVICE
     )
     mask_generator = SAM2AutomaticMaskGenerator(
         model=predictor,
@@ -560,465 +562,6 @@ def apply_effects_to_frame(frame: np.ndarray, effects_data: List[Dict], video_st
     return result_frame
 
 
-def compile_video(frames_dir: str, output_video_path: str, fps: float, width: int, height: int, original_video_path: str):
-    try:
-        import ffmpeg
-    except ImportError:
-        logger.error("ffmpeg-python is not installed. Install it using 'pip install ffmpeg-python'.")
-        raise HTTPException(status_code=500, detail="ffmpeg-python is not installed.")
-    
-    try:
-        input_frames = ffmpeg.input(os.path.join(frames_dir, '%05d.jpg'), framerate=fps)
-        input_audio = ffmpeg.input(original_video_path).audio
-
-        (
-            ffmpeg
-            .output(
-                input_frames,
-                input_audio,
-                output_video_path,
-                pix_fmt='yuv420p',
-                vcodec='libx264',          # Use H.264 codec
-                crf=18,                    # Quality parameter (lower is better)
-                preset='slow',             # Encoding speed vs. compression
-                s=f"{width}x{height}",     # Ensure original resolution
-                **{'b:v': '5000k'},        # Adjust bitrate, corrected to 'b:v'
-                acodec='copy',             # Copy audio without re-encoding
-                shortest=None,             # Use 'shortest' as a flag by setting it to None
-            )
-            .overwrite_output()
-            .run(capture_stdout=True, capture_stderr=True)  # Capture stderr for detailed errors
-        )
-        logger.info(f"Video compiled successfully at {output_video_path} with FPS={fps}, Resolution={width}x{height}")
-    except ffmpeg.Error as e:
-        stderr_output = e.stderr.decode() if e.stderr else 'No stderr available'
-        logger.error(f"ffmpeg error: {stderr_output}")
-        raise HTTPException(status_code=500, detail=f"Video compilation failed: {stderr_output}")
-    except Exception as e:
-        logger.error(f"Unexpected error during video compilation: {e}")
-        raise HTTPException(status_code=500, detail="An unexpected error occurred during video compilation.")
-
-def assign_color(obj_id: int, existing_colors: List[tuple]) -> tuple:
-    hue = (obj_id * 0.618033988749895) % 1
-    rgb = colorsys.hsv_to_rgb(hue, 0.8, 0.95)
-    return tuple(int(x * 255) for x in rgb)
-
-def overlay_mask(frame: np.ndarray, mask: np.ndarray, color: tuple, opacity: float) -> np.ndarray:
-    colored_mask = np.zeros_like(frame)
-    colored_mask[:] = color
-    mask_overlay = cv2.addWeighted(frame, 1, colored_mask, opacity, 0, dtype=cv2.CV_8U)
-    return np.where(mask[:, :, np.newaxis] == 255, mask_overlay, frame)
-
-def get_image_size(frames_dir: str) -> int:
-    first_frame_path = os.path.join(frames_dir, "00000.jpg")
-    if not os.path.exists(first_frame_path):
-        logger.error(f"First frame not found at {first_frame_path}")
-        raise HTTPException(status_code=404, detail="First frame not found.")
-    with Image.open(first_frame_path) as img:
-        width, height = img.size
-    image_size = max(width, height)
-    return image_size
-
-def export_masks_to_directory(video_state: 'VideoState'):
-    masks_dir = os.path.join(video_state.video_dir, "Masks")
-    os.makedirs(masks_dir, exist_ok=True)
-    frames_dir = os.path.join(video_state.video_dir, "frames")
-    frame_files = sorted([f for f in os.listdir(frames_dir) if f.endswith('.jpg')])
-    num_frames = len(frame_files)
-
-    logger.info(f"Starting mask export for {num_frames} frames")
-
-    for frame_idx in range(num_frames):
-        frame_masks = video_state.masks_by_frame.get(frame_idx, {})
-        if not frame_masks:
-            logger.info(f"No masks for frame {frame_idx}, skipping.")
-            continue
-
-        frame_path = os.path.join(frames_dir, f"{frame_idx:05d}.jpg")
-        frame = cv2.imread(frame_path)
-        if frame is None:
-            logger.warning(f"Frame {frame_idx} not found at {frame_path}")
-            continue
-        
-        frame_height, frame_width = frame.shape[:2]
-        logger.debug(f"Frame {frame_idx} dimensions: {frame_width}x{frame_height}")
-
-        if frame_width <= 0 or frame_height <= 0:
-            logger.error(f"Invalid frame dimensions for frame {frame_idx}: {frame_width}x{frame_height}")
-            continue
-
-        combined_mask = np.zeros((frame_height, frame_width), dtype=np.uint8)
-        for obj_id, mask in frame_masks.items():
-            if mask is None or mask.size == 0:
-                logger.warning(f"Empty mask for object {obj_id} in frame {frame_idx}")
-                continue
-
-            if not isinstance(mask, np.ndarray):
-                if isinstance(mask, torch.Tensor):
-                    mask = mask.cpu().numpy()
-                else:
-                    logger.warning(f"Unsupported mask type for object {obj_id} in frame {frame_idx}")
-                    continue
-
-            mask = mask.astype(np.uint8)
-            logger.debug(f"Mask shape for object {obj_id} in frame {frame_idx}: {mask.shape}")
-
-            if mask.shape != (frame_height, frame_width):
-                try:
-                    mask = cv2.resize(mask, (frame_width, frame_height), interpolation=cv2.INTER_NEAREST)
-                except cv2.error as e:
-                    logger.error(f"Failed to resize mask for object {obj_id} in frame {frame_idx}: {e}")
-                    continue
-
-            combined_mask = np.maximum(combined_mask, mask)
-
-        if combined_mask.max() == 0:
-            logger.warning(f"No valid masks for frame {frame_idx}")
-            continue
-
-        colored_mask = np.zeros((frame_height, frame_width, 3), dtype=np.uint8)
-        colored_mask[combined_mask > 0] = (255, 255, 255)
-
-        mask_path = os.path.join(masks_dir, f"{frame_idx:05d}.png")
-        cv2.imwrite(mask_path, colored_mask)
-        logger.info(f"Exported mask for frame {frame_idx}")
-
-    logger.info(f"Mask export completed. Exported masks saved in {masks_dir}")
-
-# API Endpoints
-
-
-
-@app.get("/")
-async def read_root():
-    return {"message": "Welcome to the SAM2 VFX Video Editor Backend!"}
-
-@app.post("/upload")
-async def upload_video(file: UploadFile = File(...)):
-    if not file.filename.lower().endswith(('.mp4', '.avi', '.mov', '.mkv')):
-        logger.warning(f"Unsupported file type: {file.filename}")
-        raise HTTPException(status_code=400, detail="Unsupported file type. Please upload a video file.")
-    video_id = str(uuid.uuid4())
-    video_dir = os.path.join(VIDEOS_DIR, video_id)
-    os.makedirs(video_dir, exist_ok=True)
-    video_path = os.path.join(video_dir, file.filename)
-    with open(video_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-    logger.info(f"Video {file.filename} uploaded as {video_id}")
-    output_frames_dir = os.path.join(video_dir, "frames")
-    os.makedirs(output_frames_dir, exist_ok=True)
-    extract_frames(video_path, output_frames_dir)
-    try:
-        image_size = get_image_size(output_frames_dir)
-        logger.info(f"Image size for video {video_id}: {image_size}")
-    except HTTPException as e:
-        logger.error(f"Failed to get image size for video {video_id}: {e.detail}")
-        raise
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        logger.error(f"Failed to open video {video_path} for metadata extraction.")
-        raise HTTPException(status_code=500, detail="Failed to process video.")
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    cap.release()
-    logger.info(f"Extracted metadata for video {video_id}: FPS={fps}, Width={width}, Height={height}")
-    with state_lock:
-        video_states[video_id] = VideoState(
-            video_id=video_id,
-            video_dir=video_dir,
-            video_filename=file.filename,
-            fps=fps,
-            width=width,
-            height=height
-        )
-    logger.info(f"Video state created for {video_id}")
-    return {"video_id": video_id}
-
-@app.get("/get_frames/{video_id}")
-async def get_frames(video_id: str):
-    with state_lock:
-        if video_id not in video_states:
-            logger.warning(f"Requested frames for non-existent video {video_id}")
-            raise HTTPException(status_code=404, detail="Video not found")
-        video_state = video_states[video_id]
-        video_state.last_access = time.time()
-    frames_dir = os.path.join(video_state.video_dir, "frames")
-    if not os.path.exists(frames_dir):
-        logger.error(f"Frames directory not found for video {video_id}")
-        raise HTTPException(status_code=404, detail="Frames directory not found")
-    frame_files = sorted([
-        p for p in os.listdir(frames_dir)
-        if os.path.splitext(p)[-1].lower() in [".jpg", ".jpeg"]
-    ], key=lambda p: int(os.path.splitext(p)[0]))
-    frame_urls = [f"/videos/{video_state.video_id}/frames/{frame}" for frame in frame_files]
-    logger.info(f"Retrieved {len(frame_urls)} frames for video {video_id}")
-    return {"frames": frame_urls}
-
-@app.post("/add_prompts")
-async def add_prompts(data: PromptData):
-    with state_lock:
-        if data.video_id not in video_states:
-            logger.warning(f"Attempted to add prompts to non-existent video {data.video_id}")
-            raise HTTPException(status_code=404, detail="Video not found")
-        video_state = video_states[data.video_id]
-        video_state.last_access = time.time()
-
-    frame_idx, obj_id = data.frame_idx, data.obj_id
-
-    # Initialize predictor state per object
-    if obj_id not in video_state.predictor_states_by_obj:
-        predictor_state = predictor.init_state(video_path=os.path.join(video_state.video_dir, "frames"))
-        video_state.predictor_states_by_obj[obj_id] = predictor_state
-        logger.info(f"Initialized predictor state for object {obj_id} in video {data.video_id}")
-    else:
-        predictor_state = video_state.predictor_states_by_obj[obj_id]
-
-    # Clear old prompts if required or initialize for the first time
-    if data.clear_old_prompts or obj_id not in video_state.prompts_by_obj:
-        video_state.prompts_by_obj[obj_id] = {'points': [], 'labels': [], 'box': None}
-        logger.info(f"Cleared old prompts for object {obj_id} in video {data.video_id}")
-
-    # Set new prompts
-    if data.points is not None and data.labels is not None:
-        video_state.prompts_by_obj[obj_id]['points'] = data.points
-        video_state.prompts_by_obj[obj_id]['labels'] = data.labels
-        logger.info(f"Set points and labels for object {obj_id} in video {data.video_id}")
-    if data.box is not None:
-        video_state.prompts_by_obj[obj_id]['box'] = data.box
-        logger.info(f"Set box for object {obj_id} in video {data.video_id}")
-
-    prompts = video_state.prompts_by_obj[obj_id]
-    obj_points = np.array(prompts['points'], dtype=np.float32) if prompts['points'] else None
-    obj_labels = np.array(prompts['labels'], dtype=np.int32) if prompts['labels'] else None
-    obj_box = np.array(prompts['box'], dtype=np.float32) if prompts['box'] else None
-
-    # Apply prompts to the predictor
-    try:
-        _, out_obj_ids, out_mask_logits = predictor.add_new_points_or_box(
-            inference_state=predictor_state,
-            frame_idx=frame_idx,
-            obj_id=obj_id,
-            points=obj_points,
-            labels=obj_labels,
-            box=obj_box,
-        )
-        logger.info(f"Added prompts for object {obj_id} in frame {frame_idx}")
-    except Exception as e:
-        logger.error(f"Failed to add prompts for video {data.video_id}, frame {frame_idx}, object {obj_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to add prompts: {str(e)}")
-
-    # Process mask logits and store them
-    try:
-        mask = out_mask_logits[0].cpu().numpy()
-        if mask.ndim == 3 and mask.shape[0] == 1:
-            mask = np.squeeze(mask, axis=0)
-        mask_binary = (mask > 0).astype(np.uint8) * 255
-        logger.debug(f"Generated mask for object {obj_id} in frame {frame_idx}: shape={mask_binary.shape}")
-        with state_lock:
-            if frame_idx not in video_state.masks_by_frame:
-                video_state.masks_by_frame[frame_idx] = {}
-            video_state.masks_by_frame[frame_idx][obj_id] = mask_binary
-            logger.debug(f"Stored mask for object {obj_id} in frame {frame_idx}")
-    except Exception as e:
-        logger.error(f"Failed to process mask for video {data.video_id}, frame {frame_idx}, object {obj_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to process mask: {str(e)}")
-
-    return {"frame_idx": frame_idx, "obj_ids": [obj_id]}
-
-@app.get("/get_masks/{video_id}/{frame_idx}")
-async def get_masks(video_id: str, frame_idx: int):
-    with state_lock:
-        if video_id not in video_states:
-            logger.warning(f"Requested masks for non-existent video {video_id}")
-            raise HTTPException(status_code=404, detail="Video not found")
-        video_state = video_states[video_id]
-        video_state.last_access = time.time()
-    frame_idx = int(frame_idx)
-    if frame_idx in video_state.masks_by_frame:
-        obj_masks = video_state.masks_by_frame[frame_idx]
-        serializable_masks = {}
-        for obj_id, mask in obj_masks.items():
-            if obj_id not in video_state.muted_objects:
-                frames_dir = os.path.join(video_state.video_dir, "frames")
-                frame_path = os.path.join(frames_dir, f"{frame_idx:05d}.jpg")
-                frame = cv2.imread(frame_path)
-                if frame is None:
-                    logger.warning(f"Frame {frame_idx} not found at {frame_path}")
-                    continue
-                h, w = frame.shape[:2]
-                logger.debug(f"Loaded frame {frame_idx}: height={h}, width={w}")
-                # Ensure mask has the correct shape
-                if mask.ndim == 3 and mask.shape[0] == 1:
-                    mask = np.squeeze(mask, axis=0)
-
-                if mask.shape != (h, w):
-                    logger.warning(
-                        f"Mask shape {mask.shape} does not match frame dimensions ({h}, {w}). Attempting to resize."
-                    )
-                    try:
-                        mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
-                        logger.debug(f"Resized mask for object {obj_id} in frame {frame_idx} to ({h}, {w})")
-                    except cv2.error as e:
-                        logger.error(f"Failed to resize mask for frame {frame_idx}, object {obj_id}: {e}")
-                        continue
-                color = video_state.obj_colors.get(obj_id, assign_color(obj_id, list(video_state.obj_colors.values())))
-                video_state.obj_colors[obj_id] = color
-                colored_mask = np.zeros((h, w, 3), dtype=np.uint8)
-                colored_mask[mask > 0] = color
-                success, buffer = cv2.imencode('.png', colored_mask)
-                if not success:
-                    logger.error(f"Failed to encode mask for frame {frame_idx}, object {obj_id}")
-                    continue
-                mask_png = base64.b64encode(buffer).decode('utf-8')
-                serializable_masks[str(obj_id)] = mask_png
-                logger.debug(f"Encoded mask for object {obj_id} in frame {frame_idx}")
-        logger.info(f"Retrieved masks for frame {frame_idx} in video {video_id}")
-        return {"frame_idx": frame_idx, "masks": serializable_masks}
-    else:
-        logger.info(f"No masks found for frame {frame_idx} in video {video_id}")
-        return {"frame_idx": frame_idx, "masks": {}}
-
-@app.post("/delete_object")
-async def delete_object(data: DeleteObjectData):
-    with state_lock:
-        if data.video_id not in video_states:
-            logger.warning(f"Attempted to delete object from non-existent video {data.video_id}")
-            raise HTTPException(status_code=404, detail="Video not found")
-        video_state = video_states[data.video_id]
-        video_state.last_access = time.time()
-        obj_id = data.obj_id
-        if obj_id in video_state.prompts_by_obj:
-            del video_state.prompts_by_obj[obj_id]
-            logger.info(f"Removed prompts for object {obj_id} in video {data.video_id}")
-        if obj_id in video_state.predictor_states_by_obj:
-            del video_state.predictor_states_by_obj[obj_id]
-            logger.info(f"Removed predictor state for object {obj_id} in video {data.video_id}")
-        frames_to_update = []
-        for frame_idx, obj_masks in video_state.masks_by_frame.items():
-            if obj_id in obj_masks:
-                del obj_masks[obj_id]
-                frames_to_update.append(frame_idx)
-                logger.debug(f"Removed mask for object {obj_id} in frame {frame_idx}")
-        for frame_idx in frames_to_update:
-            if not video_state.masks_by_frame[frame_idx]:
-                del video_state.masks_by_frame[frame_idx]
-                logger.debug(f"Deleted empty mask entry for frame {frame_idx} in video {data.video_id}")
-        if obj_id in video_state.effects_by_obj:
-            del video_state.effects_by_obj[obj_id]
-            logger.info(f"Removed effects for object {obj_id} in video {data.video_id}")
-        if obj_id in video_state.obj_colors:
-            del video_state.obj_colors[obj_id]
-        if obj_id in video_state.muted_objects:
-            video_state.muted_objects.remove(obj_id)
-    return {"message": f"Object {obj_id} and its masks have been deleted"}
-
-@app.post("/track_objects")
-async def track_objects(data: ExportData, background_tasks: BackgroundTasks):
-    video_id = data.video_id
-    with state_lock:
-        if video_id not in video_states:
-            logger.warning(f"Attempted to track objects in non-existent video {video_id}")
-            raise HTTPException(status_code=404, detail="Video not found")
-        video_state = video_states[video_id]
-        video_state.last_access = time.time()
-        video_state.tracking_complete = False
-        logger.info(f"Initiating tracking for video {video_id}")
-    background_tasks.add_task(run_tracking, video_id)
-    return {"message": "Tracking started"}
-
-@app.get("/tracking_status/{video_id}")
-async def tracking_status(video_id: str):
-    with state_lock:
-        if video_id not in video_states:
-            logger.warning(f"Requested tracking status for non-existent video {video_id}")
-            raise HTTPException(status_code=404, detail="Video not found")
-        video_state = video_states[video_id]
-        video_state.last_access = time.time()
-        if video_state.tracking_complete:
-            logger.info(f"Tracking complete for video {video_id}")
-            return {"status": "complete"}
-        else:
-            logger.info(f"Tracking in progress for video {video_id}")
-            return {"status": "in_progress"}
-        
-def apply_concurrent_effects(frame, all_effects_data, video_state):
-    """
-    Apply multiple objects' effects to a single frame.
-    (Synchronous function; none of the operations require awaiting.)
-    """
-    # Start with a copy of the original frame.
-    result_frame = frame.copy()
-
-    # Process each object's effect data.
-    for effect_data in all_effects_data:
-        obj_id = effect_data.get('id')
-        effects = effect_data.get('effects', [])
-        feather_params = effect_data.get('feather_params', {})
-        mask = effect_data.get('mask')
-        if mask is None:
-            continue
-        # If the mask has an extra dimension, squeeze it.
-        if mask.ndim == 3:
-            mask = mask.squeeze()
-
-        # Create a working copy for this object's effects.
-        obj_frame = result_frame.copy()
-
-        for effect in effects:
-            if getattr(effect, 'muted', True):
-                continue
-
-            # Retrieve the effect function from the loaded fx_scripts.
-            effect_script = video_state.fx_scripts.get(effect.name)
-            if not effect_script:
-                logger.error(f"Effect {effect.name} not found")
-                continue
-            effect_func = effect_script['function']
-
-            try:
-                # Prepare parameters for the effect function.
-                effect_params = effect.params.copy() if hasattr(effect, 'params') else {}
-                import inspect
-                sig = inspect.signature(effect_func)
-                # Add the mask to the parameters if required.
-                if 'mask' in sig.parameters:
-                    effect_params['mask'] = mask
-                elif 'sam2_mask' in sig.parameters:
-                    effect_params['sam2_mask'] = mask
-
-                # Apply the effect to the object frame.
-                effect_frame = effect_func(obj_frame, **effect_params)
-                if effect_frame is None:
-                    continue
-
-                # Apply feathering to the mask.
-                feathered_mask = apply_feathering(mask, feather_params)
-                if feathered_mask is None:
-                    logger.error(f"Feathering returned None for object {obj_id}")
-                    continue
-                # Ensure the feathered mask is 3D for proper blending.
-                if feathered_mask.ndim == 2:
-                    feathered_mask = feathered_mask[:, :, np.newaxis]
-
-                # Get opacity; default to 1.0 if not specified.
-                opacity = getattr(effect, 'opacity', 1.0)
-                feathered_mask = feathered_mask * opacity
-
-                # Blend the effect output with the current object frame.
-                obj_frame = obj_frame * (1 - feathered_mask) + effect_frame * feathered_mask
-
-            except Exception as e:
-                logger.error(f"Error applying effect {effect.name} for object {obj_id}: {str(e)}")
-                logger.error(f"Effect params: {effect_params}")
-                continue
-
-        # Update the overall result frame with the processed object frame.
-        result_frame = obj_frame
-
-    return result_frame
-
-
 
 
 @app.post("/apply_effects")
@@ -1050,7 +593,7 @@ async def apply_effects(request: ApplyEffectsRequest):
             "id": request.obj_id,
             "effects": request.effects,
             "feather_params": request.feather_params,
-            "mask": video_state.masks_by_frame.get(request.frame_idx, {}).get(request.obj_id)
+            "mask": video_state.masks_by_frame.get(request.frame_idx, {})
         }
 
         processed_frame = apply_effects_pipeline(
